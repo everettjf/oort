@@ -25,13 +25,20 @@ Boot a Linux VM with Apple's `Virtualization.framework`, then make the **stock `
 
 This is the same backbone OrbStack / Lima / Colima use, distilled to its essence so every moving part is visible. See the [research report](../orbstack-research.md) for the full picture and roadmap.
 
-| ✔ Verified on this machine | |
-|---|---|
-| Boots Ubuntu 24.04 (arm64) via VZ EFI | macOS 26.3, Apple Silicon |
-| cloud-init applies the seed (hostname, packages) | first boot, fully unattended |
-| `docker.sock` projected onto macOS over vsock | `DockerSocketProxy` |
+### ✔ Verified end-to-end on a real machine (macOS 26.3, Apple Silicon)
 
-> ⏱️ **First boot provisions itself** (installs Docker + socat via cloud-init). On a fresh image this takes **a few minutes** — subsequent boots are instant.
+```text
+$ export DOCKER_HOST=unix://~/.openorb/docker.sock
+$ docker version
+  Server: Docker 29.1.3 | API 1.52 | linux/arm64      ← running inside the VM
+$ docker run --rm hello-world
+  Hello from Docker!                                   ← pulled from Docker Hub, ran an arm64 container
+```
+
+The full path was exercised: macOS `docker` CLI → `~/.openorb/docker.sock` → `openorb` (Swift, VZ) → **vsock** → guest `socat` → `dockerd` → container.
+
+> ⏱️ **First boot provisions itself** (cloud-init installs Docker + socat).
+> On a fresh image this takes a couple of minutes; later boots are instant.
 
 ---
 
@@ -126,7 +133,8 @@ openorb run --disk <path> [options]
 
 | Symptom | Cause / fix |
 |---|---|
-| `docker` hangs on first boot | cloud-init is still installing Docker. `tail -f images/console.log`; wait a few minutes. |
+| `docker` hangs on first boot | cloud-init is still installing Docker. Wait a couple of minutes. |
+| Provisioning stalls for many minutes | The VZ NAT resolver may return IPv6-only mirror addresses while the guest is IPv4-only, so `apt` times out. We force IPv4 in `cloud-init/user-data` (`Acquire::ForceIPv4`) — keep that if you regenerate the seed. |
 | “VM failed to start … entitlement” | run via `./run.sh` (it codesigns with the virtualization entitlement). |
 | `connection refused` on the socket | the VM exited — check `images/console.log`. |
 | Want a guest shell | console login is `ubuntu` / `openorb` (set in `cloud-init/user-data`). |

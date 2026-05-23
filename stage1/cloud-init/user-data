@@ -15,6 +15,12 @@ packages:
   - socat
 
 write_files:
+  # The VZ NAT resolver hands back IPv6 mirror addresses, but the guest only
+  # has IPv4 connectivity — so apt stalls on IPv6 timeouts. Force IPv4.
+  - path: /etc/apt/apt.conf.d/99force-ipv4
+    permissions: "0644"
+    content: |
+      Acquire::ForceIPv4 "true";
   - path: /etc/systemd/system/openorb-docker-vsock.service
     permissions: "0644"
     content: |
