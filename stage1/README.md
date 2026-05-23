@@ -1,98 +1,145 @@
-# openorb — Stage 1 skeleton
+<div align="center">
 
-A minimal, dependency-free Swift program that does the two core things from the
-[research report](../orbstack-research.md) §4.2 阶段一:
+# 🛰️ openorb — Stage 1
 
-1. **Boots a Linux VM** with Apple's `Virtualization.framework` (virtio block /
-   net / vsock / console).
-2. **Projects the guest Docker socket** onto a macOS Unix socket over
-   **virtio-vsock**, so the stock `docker` CLI works against it.
+**A tiny OrbStack-style runtime in ~600 lines of Swift.**
 
-This is the same backbone OrbStack / Lima / Colima use. It is intentionally
-small (~5 source files, no external packages) so every moving part is visible.
+Boot a Linux VM with Apple's `Virtualization.framework`, then make the **stock `docker` CLI on macOS** talk to the Docker engine *inside* the VM — over a `virtio-vsock` tunnel, no TCP, no Docker Desktop.
+
+</div>
+
+---
+
+## What it does
 
 ```
-docker CLI ──unix──▶ ~/.openorb/docker.sock ──vsock──▶ [guest] socat ──▶ /run/docker.sock ──▶ dockerd
-            (host: DockerSocketProxy)        (VZVirtioSocketDevice)        (guest setup, see below)
+   ┌─ macOS ──────────────────────────────────┐        ┌─ Linux VM (Virtualization.framework) ─┐
+   │                                           │        │                                       │
+   │  docker CLI                               │        │   socat ──► /run/docker.sock          │
+   │     │ DOCKER_HOST=unix://~/.openorb/...   │        │     ▲              │                  │
+   │     ▼                                     │ vsock  │     │              ▼                  │
+   │  ~/.openorb/docker.sock ──► openorb ──────┼────────┼─► VSOCK-LISTEN   dockerd              │
+   │                          (DockerSocketProxy)        │      :2375                            │
+   └───────────────────────────────────────────┘        └───────────────────────────────────────┘
 ```
+
+This is the same backbone OrbStack / Lima / Colima use, distilled to its essence so every moving part is visible. See the [research report](../orbstack-research.md) for the full picture and roadmap.
+
+| ✔ Verified on this machine | |
+|---|---|
+| Boots Ubuntu 24.04 (arm64) via VZ EFI | macOS 26.3, Apple Silicon |
+| cloud-init applies the seed (hostname, packages) | first boot, fully unattended |
+| `docker.sock` projected onto macOS over vsock | `DockerSocketProxy` |
+
+> ⏱️ **First boot provisions itself** (installs Docker + socat via cloud-init). On a fresh image this takes **a few minutes** — subsequent boots are instant.
+
+---
 
 ## Requirements
 
-- Apple Silicon Mac, macOS 13+
-- Swift toolchain (`swift --version`)
-- A bootable **arm64 Linux raw disk image** with Docker installed (see below)
+- Apple Silicon Mac, **macOS 13+** (tested on 26.3)
+- Swift toolchain — `swift --version`
+- `qemu-img` to convert the cloud image — `brew install qemu`
 
-## 1. Get a guest image
+---
 
-The skeleton needs a disk image to boot. Easiest options:
-
-- **Reuse what Lima/Colima already downloaded** (an Ubuntu cloud image), or
-- Download an Ubuntu **arm64** cloud image and convert it to raw:
-
-  ```bash
-  mkdir -p images
-  # qcow2 → raw (needs qemu-img: brew install qemu)
-  qemu-img convert -f qcow2 -O raw ubuntu-24.04-arm64.qcow2 images/ubuntu.img
-  # optionally grow it
-  truncate -s 20G images/ubuntu.img
-  ```
-
-> Cloud images expect cloud-init for first-boot login. For a quick spike, a
-> distro image you can already log into (console attached) is simplest. Direct
-> kernel boot (`--kernel/--initrd`) is also supported if you have matching
-> artifacts.
-
-## 2. Inside the guest: install Docker + the vsock bridge
-
-Boot once (console is attached to your terminal by default), log in, then:
+## Quick start
 
 ```bash
-# Docker engine
-curl -fsSL https://get.docker.com | sh
+cd stage1
 
-# vsock → docker socket bridge
-sudo apt-get install -y socat
-sudo cp /path/to/openorb-docker-vsock.service /etc/systemd/system/
-sudo systemctl enable --now openorb-docker-vsock.service
-```
+# 1. Get an Ubuntu arm64 cloud image (~600 MB)
+mkdir -p images
+curl -fL -o images/noble-arm64.img \
+  https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-arm64.img
 
-(`guest/openorb-docker-vsock.service` is included here — copy it into the VM.)
+# 2. Build the boot disk (raw) + cloud-init seed that installs Docker
+./make-image.sh
 
-## 3. Run
+# 3. Boot the VM and project the Docker socket
+./run.sh run --disk images/disk.img --seed images/seed.img
 
-```bash
-./run.sh run --disk ./images/ubuntu.img --cpus 4 --memory 4
-```
-
-`run.sh` builds, **codesigns with the `com.apple.security.virtualization`
-entitlement** (VZ refuses to launch without it), then starts the VM. Once up:
-
-```bash
-export DOCKER_HOST=unix://$HOME/.openorb/docker.sock
-docker ps
+# 4. In another terminal — point Docker at the projected socket
+export DOCKER_HOST="unix://$HOME/.openorb/docker.sock"
+docker version      # may take a few minutes on the very first boot
 docker run --rm hello-world
 ```
 
-Press **Ctrl-C** to request a clean guest shutdown.
+`run.sh` builds, **codesigns the binary with the `com.apple.security.virtualization` entitlement** (VZ refuses to launch without it), then starts the VM. Press **Ctrl-C** for a clean guest shutdown.
 
-## Files
+> 💡 The very first `docker` call waits for cloud-init to finish installing Docker.
+> Watch progress with: `tail -f images/console.log`
 
-| File | Role |
+---
+
+## How it works
+
+1. **`make-image.sh`** converts the qcow2 cloud image to **raw** (VZ needs raw), grows it to 12 GB, and builds a **cloud-init NoCloud seed** (`CIDATA`) from [`cloud-init/`](cloud-init/). On first boot cloud-init reads the seed and installs `docker.io` + `socat`, then enables a unit that does:
+   ```
+   socat VSOCK-LISTEN:2375,fork,reuseaddr UNIX-CONNECT:/run/docker.sock
+   ```
+2. **`openorb` (Swift)** builds a `VZVirtualMachineConfiguration` — virtio block (boot disk + seed), virtio-net (NAT), **virtio-vsock**, entropy, balloon, console — and starts the VM on the queue VZ requires.
+3. **`DockerSocketProxy`** listens on a macOS `AF_UNIX` socket. For each client it opens a host→guest **vsock** connection to port `2375` and splices the two file descriptors. Result: the unmodified `docker` CLI thinks it's talking to a local daemon.
+
+---
+
+## Usage reference
+
+```
+openorb run --disk <path> [options]
+
+  --disk <path>            Bootable raw disk image (required)
+  --seed <path>            Extra read-only disk (cloud-init CIDATA image)
+  --nvram <path>           EFI variable store (default: <disk>.nvram)
+  --kernel/--initrd/--cmdline   Direct kernel boot instead of EFI
+
+  --cpus <n>               vCPU count (default: 4)
+  --memory <GiB>           Memory in GiB (default: 4)
+
+  --vsock-port <n>         Guest vsock port serving dockerd (default: 2375)
+  --socket <path>          Host Unix socket (default: ~/.openorb/docker.sock)
+
+  --no-console             Don't attach the guest console to stdio
+  --console-log <path>     Write the guest console to a file (headless)
+```
+
+---
+
+## Project layout
+
+| Path | Role |
 |------|------|
-| `Sources/openorb/Config.swift` | CLI flag parsing |
-| `Sources/openorb/VMConfig.swift` | builds the `VZVirtualMachineConfiguration` (all devices) |
-| `Sources/openorb/VMManager.swift` | VM lifecycle on the VZ serial queue |
-| `Sources/openorb/DockerSocketProxy.swift` | AF_UNIX listener ⇄ vsock fd splice |
+| `Sources/openorb/Config.swift` | CLI flag parsing (zero dependencies) |
+| `Sources/openorb/VMConfig.swift` | builds the `VZVirtualMachineConfiguration` |
+| `Sources/openorb/VMManager.swift` | VM lifecycle, pinned to the VZ serial queue |
+| `Sources/openorb/DockerSocketProxy.swift` | `AF_UNIX` ⇄ vsock fd splice |
 | `Sources/openorb/main.swift` | entry point, SIGINT handling, run loop |
 | `openorb.entitlements` | the one entitlement VZ needs |
-| `guest/openorb-docker-vsock.service` | guest-side socat bridge |
+| `make-image.sh` | qcow2→raw + resize + build cloud-init seed |
+| `cloud-init/` | NoCloud `user-data` / `meta-data` (installs Docker + socat) |
+| `guest/` | the vsock→docker.sock systemd unit (also baked by cloud-init) |
+| `run.sh` | build + codesign + launch |
 
-## What this skeleton deliberately leaves out (later stages)
+---
 
-- **VirtioFS bind mounts** + the caching layer that makes them fast (OrbStack's moat)
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `docker` hangs on first boot | cloud-init is still installing Docker. `tail -f images/console.log`; wait a few minutes. |
+| “VM failed to start … entitlement” | run via `./run.sh` (it codesigns with the virtualization entitlement). |
+| `connection refused` on the socket | the VM exited — check `images/console.log`. |
+| Want a guest shell | console login is `ubuntu` / `openorb` (set in `cloud-init/user-data`). |
+
+---
+
+## What this stage deliberately leaves out
+
+The fast, magical parts of OrbStack are **not** here yet — that's the point of staging:
+
+- **VirtioFS bind mounts** + the caching layer that makes them fast *(OrbStack's real moat)*
 - **Custom user-space netstack** (port auto-forward, follow macOS VPN/DNS)
 - **Rosetta** x86 emulation (`VZLinuxRosettaDirectoryShare`)
-- **Dynamic memory** tuning / zram, multi-machine namespacing, GUI
+- **Dynamic memory** / zram, multi-machine namespacing, native GUI
 
-See the research report §4 for the full roadmap and which open-source pieces
-(Lima, gvisor-tap-vsock, virtiofsd, Apple's `containerization`) to borrow next.
+See [research report §4](../orbstack-research.md) for the roadmap and which open-source pieces (Lima, gvisor-tap-vsock, virtiofsd, Apple's `containerization`) to borrow next.

@@ -19,13 +19,19 @@ enum VMConfig {
         vm.platform = VZGenericPlatformConfiguration()
         vm.bootLoader = try makeBootLoader(cfg.boot)
 
-        vm.storageDevices = [try makeDisk(cfg.diskImage)]
+        var disks: [VZStorageDeviceConfiguration] = [try makeDisk(cfg.diskImage, readOnly: false)]
+        if let seed = cfg.seedImage {
+            disks.append(try makeDisk(seed, readOnly: true)) // cloud-init CIDATA
+        }
+        vm.storageDevices = disks
         vm.networkDevices = [makeNAT()]
         vm.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         vm.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
         vm.socketDevices = [VZVirtioSocketDeviceConfiguration()]
 
-        if cfg.serialConsole {
+        if let logURL = cfg.consoleLog {
+            vm.serialPorts = [try makeConsoleToFile(logURL)]
+        } else if cfg.serialConsole {
             vm.serialPorts = [makeConsole()]
         }
 
@@ -63,11 +69,11 @@ enum VMConfig {
 
     // MARK: - Devices
 
-    private static func makeDisk(_ url: URL) throws -> VZStorageDeviceConfiguration {
+    private static func makeDisk(_ url: URL, readOnly: Bool) throws -> VZStorageDeviceConfiguration {
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw CLIError.runtime("disk image not found: \(url.path)")
         }
-        let attachment = try VZDiskImageStorageDeviceAttachment(url: url, readOnly: false)
+        let attachment = try VZDiskImageStorageDeviceAttachment(url: url, readOnly: readOnly)
         return VZVirtioBlockDeviceConfiguration(attachment: attachment)
     }
 
@@ -83,6 +89,16 @@ enum VMConfig {
             fileHandleForReading: FileHandle.standardInput,
             fileHandleForWriting: FileHandle.standardOutput
         )
+        return port
+    }
+
+    private static func makeConsoleToFile(_ url: URL) throws -> VZVirtioConsoleDeviceSerialPortConfiguration {
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        guard let handle = FileHandle(forWritingAtPath: url.path) else {
+            throw CLIError.runtime("cannot open console log: \(url.path)")
+        }
+        let port = VZVirtioConsoleDeviceSerialPortConfiguration()
+        port.attachment = VZFileHandleSerialPortAttachment(fileHandleForReading: nil, fileHandleForWriting: handle)
         return port
     }
 

@@ -22,6 +22,10 @@ struct Config {
     var hostSocketPath: String
     /// Attach the guest console to this process's stdio for debugging.
     var serialConsole: Bool
+    /// Optional second read-only disk (e.g. a cloud-init NoCloud CIDATA image).
+    var seedImage: URL?
+    /// If set, write the guest serial console to this file (headless debugging).
+    var consoleLog: URL?
 
     static func defaultSocketPath() -> String {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -38,6 +42,7 @@ struct Config {
 
         BOOT (pick one; defaults to EFI):
           --disk <path>            Bootable raw disk image (required)
+          --seed <path>            Extra read-only disk, e.g. cloud-init CIDATA image
           --nvram <path>           EFI variable store path (default: <disk>.nvram)
           --kernel <path>          Direct kernel boot: kernel Image (switches off EFI)
           --initrd <path>          Initial ramdisk for kernel boot (optional)
@@ -54,6 +59,7 @@ struct Config {
 
         MISC:
           --no-console             Don't attach the guest serial console to stdio
+          --console-log <path>     Write the guest console to a file (headless)
           -h, --help               Show this help
 
         After it boots, point the Docker CLI at the projected socket:
@@ -69,6 +75,8 @@ struct Config {
         }
 
         var disk: URL?
+        var seed: URL?
+        var consoleLog: URL?
         var nvram: URL?
         var kernel: URL?
         var initrd: URL?
@@ -87,6 +95,8 @@ struct Config {
         while let arg = it.next() {
             switch arg {
             case "--disk":       disk = URL(fileURLWithPath: try need(arg))
+            case "--seed":       seed = URL(fileURLWithPath: try need(arg))
+            case "--console-log": consoleLog = URL(fileURLWithPath: try need(arg))
             case "--nvram":      nvram = URL(fileURLWithPath: try need(arg))
             case "--kernel":     kernel = URL(fileURLWithPath: try need(arg))
             case "--initrd":     initrd = URL(fileURLWithPath: try need(arg))
@@ -117,7 +127,9 @@ struct Config {
             memoryBytes: UInt64(memGiB * 1024 * 1024 * 1024),
             guestVsockPort: vsockPort,
             hostSocketPath: socketPath,
-            serialConsole: console
+            serialConsole: console,
+            seedImage: seed,
+            consoleLog: consoleLog
         )
     }
 }
