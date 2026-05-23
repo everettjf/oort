@@ -12,10 +12,19 @@ struct Config {
         case kernel(kernel: URL, initrd: URL?, cmdline: String)
     }
 
+    /// A host directory shared into the guest over VirtioFS, addressed by `tag`.
+    struct Mount {
+        var host: URL
+        var tag: String
+        var readOnly: Bool
+    }
+
     var diskImage: URL
     var boot: Boot
     var cpuCount: Int
     var memoryBytes: UInt64
+    /// Host directories shared into the guest via VirtioFS (Stage 2).
+    var mounts: [Mount]
     /// vsock port inside the guest where dockerd is exposed (see guest/ setup).
     var guestVsockPort: UInt32
     /// Unix socket on macOS that the Docker CLI will talk to.
@@ -53,6 +62,11 @@ struct Config {
           --cpus <n>               vCPU count (default: 4)
           --memory <GiB>           Memory in GiB (default: 4)
 
+        FILE SHARING (Stage 2, VirtioFS):
+          --mount <hostdir>[:tag]  Share a host dir into the guest (repeatable).
+                                   Default tag for the first mount is "mac"
+                                   (the guest mounts it at /mnt/<tag>).
+
         DOCKER PROJECTION:
           --vsock-port <n>         Guest vsock port serving dockerd (default: 2375)
           --socket <path>          Host Unix socket (default: ~/.openorb/docker.sock)
@@ -76,6 +90,7 @@ struct Config {
 
         var disk: URL?
         var seed: URL?
+        var mounts: [Mount] = []
         var consoleLog: URL?
         var nvram: URL?
         var kernel: URL?
@@ -96,6 +111,7 @@ struct Config {
             switch arg {
             case "--disk":       disk = URL(fileURLWithPath: try need(arg))
             case "--seed":       seed = URL(fileURLWithPath: try need(arg))
+            case "--mount":      mounts.append(try parseMount(need(arg), index: mounts.count))
             case "--console-log": consoleLog = URL(fileURLWithPath: try need(arg))
             case "--nvram":      nvram = URL(fileURLWithPath: try need(arg))
             case "--kernel":     kernel = URL(fileURLWithPath: try need(arg))
@@ -125,12 +141,26 @@ struct Config {
             boot: boot,
             cpuCount: cpus,
             memoryBytes: UInt64(memGiB * 1024 * 1024 * 1024),
+            mounts: mounts,
             guestVsockPort: vsockPort,
             hostSocketPath: socketPath,
             serialConsole: console,
             seedImage: seed,
             consoleLog: consoleLog
         )
+    }
+
+    /// Parse `--mount` specs: `hostdir`, `hostdir:tag`, or `hostdir:tag:ro`.
+    /// macOS paths don't contain ':', so splitting on it is safe.
+    private static func parseMount(_ spec: String, index: Int) throws -> Mount {
+        let parts = spec.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
+        guard let hostPart = parts.first, !hostPart.isEmpty else {
+            throw CLIError.usage("--mount needs a host directory")
+        }
+        let host = URL(fileURLWithPath: (hostPart as NSString).expandingTildeInPath)
+        let tag = (parts.count > 1 && !parts[1].isEmpty) ? parts[1] : (index == 0 ? "mac" : "share\(index)")
+        let readOnly = parts.count > 2 && parts[2] == "ro"
+        return Mount(host: host, tag: tag, readOnly: readOnly)
     }
 }
 

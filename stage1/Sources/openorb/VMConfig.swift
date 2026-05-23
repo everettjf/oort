@@ -28,6 +28,7 @@ enum VMConfig {
         vm.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         vm.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
         vm.socketDevices = [VZVirtioSocketDeviceConfiguration()]
+        vm.directorySharingDevices = try cfg.mounts.map { try makeShare($0) }
 
         if let logURL = cfg.consoleLog {
             vm.serialPorts = [try makeConsoleToFile(logURL)]
@@ -75,6 +76,25 @@ enum VMConfig {
         }
         let attachment = try VZDiskImageStorageDeviceAttachment(url: url, readOnly: readOnly)
         return VZVirtioBlockDeviceConfiguration(attachment: attachment)
+    }
+
+    // MARK: - VirtioFS directory sharing (Stage 2)
+
+    private static func makeShare(_ m: Config.Mount) throws -> VZDirectorySharingDeviceConfiguration {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: m.host.path, isDirectory: &isDir), isDir.boolValue else {
+            throw CLIError.runtime("--mount host directory not found: \(m.host.path)")
+        }
+        do {
+            try VZVirtioFileSystemDeviceConfiguration.validateTag(m.tag)
+        } catch {
+            throw CLIError.runtime("invalid VirtioFS tag '\(m.tag)': \(error.localizedDescription)")
+        }
+        let device = VZVirtioFileSystemDeviceConfiguration(tag: m.tag)
+        let shared = VZSharedDirectory(url: m.host, readOnly: m.readOnly)
+        device.share = VZSingleDirectoryShare(directory: shared)
+        Log.info("virtiofs share: \(m.host.path) → tag '\(m.tag)'\(m.readOnly ? " (ro)" : "")")
+        return device
     }
 
     private static func makeNAT() -> VZVirtioNetworkDeviceConfiguration {
