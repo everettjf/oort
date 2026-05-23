@@ -1,0 +1,20 @@
+# Inside the guest: expose dockerd's Unix socket on vsock so the macOS host can
+# reach it. Install with:
+#   sudo cp openorb-docker-vsock.service /etc/systemd/system/
+#   sudo apt-get install -y socat            # or your distro's package manager
+#   sudo systemctl enable --now openorb-docker-vsock.service
+#
+# The host (Stage 1 proxy) connects to vsock port 2375; change here AND on the
+# host (--vsock-port) if you pick a different port.
+[Unit]
+Description=openorb: forward vsock:2375 to the Docker socket
+After=docker.socket docker.service
+Requires=docker.service
+
+[Service]
+ExecStart=/usr/bin/socat VSOCK-LISTEN:2375,fork,reuseaddr UNIX-CONNECT:/run/docker.sock
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
