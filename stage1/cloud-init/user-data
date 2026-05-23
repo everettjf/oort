@@ -88,6 +88,33 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
+  # zram swap (Stage 4): compressed RAM-backed swap, like OrbStack's. Lets the
+  # guest reclaim memory under pressure instead of OOM-killing.
+  - path: /usr/local/bin/openorb-zram.sh
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      modprobe zram num_devices=1 2>/dev/null || exit 0
+      [ -e /dev/zram0 ] || exit 0
+      swapon --show=NAME --noheadings 2>/dev/null | grep -q zram0 && exit 0
+      echo lz4 > /sys/block/zram0/comp_algorithm 2>/dev/null || true
+      MEM_KB=$(awk '/MemTotal/{print $2}' /proc/meminfo)
+      echo "$((MEM_KB / 2))K" > /sys/block/zram0/disksize
+      mkswap /dev/zram0 >/dev/null 2>&1
+      swapon -p 100 /dev/zram0
+      echo "openorb: zram swap on ($((MEM_KB / 2)) KB)"
+  - path: /etc/systemd/system/openorb-zram.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=openorb zram swap
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/openorb-zram.sh
+      RemainAfterExit=yes
+      [Install]
+      WantedBy=multi-user.target
+
   # Register Rosetta with binfmt_misc so x86-64 ELF (incl. amd64 containers)
   # is translated. printf %s writes the literal \xHH magic; the kernel decodes
   # it. The "F" flag opens the interpreter at registration time, so it works
@@ -135,4 +162,5 @@ runcmd:
   - systemctl enable --now docker.service
   - systemctl enable --now openorb-guest.service
   - systemctl enable --now openorb-rosetta.service || true
+  - systemctl enable --now openorb-zram.service || true
   - touch /run/openorb-ready

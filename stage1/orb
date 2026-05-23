@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# orb — the openorb command-line front-end (Stage 4).
+#
+# A thin, OrbStack-style wrapper around `openorb run`: start/stop the VM, run
+# commands in the guest, and point the Docker CLI at the projected socket.
+#
+#   orb start                 boot the VM (Docker + file sharing + Rosetta + ports)
+#   orb stop                  shut the VM down
+#   orb status                show VM / Docker status
+#   orb exec <cmd...>         run a command inside the guest
+#   orb shell                 interactive-ish guest shell (line at a time)
+#   orb docker <args...>      run docker against the openorb daemon
+#   orb env                   print `export DOCKER_HOST=...` for your shell
+#   orb logs                  tail the guest console log
+#   orb build-image           (re)build the boot disk + cloud-init seed
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+STATE="$HOME/.openorb"
+DOCKER_SOCK="$STATE/docker.sock"
+AGENT_SOCK="$STATE/agent.sock"
+CONSOLE_LOG="$STATE/console.log"
+PIDFILE="$STATE/vm.pid"
+DISK="${OPENORB_DISK:-$HERE/images/disk.img}"
+SEED="${OPENORB_SEED:-$HERE/images/seed.img}"
+SHARE="${OPENORB_SHARE:-$HERE/share}"
+mkdir -p "$STATE"
+
+bin() {
+  local b; b="$(cd "$HERE" && swift build -c release --show-bin-path 2>/dev/null)/openorb"
+  if [ ! -x "$b" ]; then
+    (cd "$HERE" && swift build -c release >/dev/null)
+    codesign --force --sign - --entitlements "$HERE/openorb.entitlements" "$b" >/dev/null 2>&1
+  fi
+  echo "$b"
+}
+
+vm_running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
+
+cmd_start() {
+  if vm_running; then echo "openorb already running (pid $(cat "$PIDFILE"))"; return 0; fi
+  [ -f "$DISK" ] || { echo "no disk image at $DISK — run 'orb build-image' first"; exit 1; }
+  local b; b="$(bin)"
+  rm -f "$DOCKER_SOCK" "$AGENT_SOCK"
+  echo "starting openorb VM…"
+  nohup "$b" run \
+    --disk "$DISK" --seed "$SEED" \
+    --mount "$SHARE:mac" --rosetta \
+    --forward "$AGENT_SOCK:2376" \
+    --no-console --console-log "$CONSOLE_LOG" \
+    --socket "$DOCKER_SOCK" > "$STATE/vm.log" 2>&1 &
+  echo $! > "$PIDFILE"
+  printf "waiting for Docker"
+  for _ in $(seq 1 60); do
+    if curl -s --max-time 4 --unix-socket "$DOCKER_SOCK" http://localhost/_ping 2>/dev/null | grep -q OK; then
+      echo " ready."; echo; cmd_env; return 0
+    fi
+    printf "."; sleep 2
+  done
+  echo " timed out (see $CONSOLE_LOG)"; exit 1
+}
+
+cmd_stop() {
+  if ! vm_running; then echo "openorb not running"; return 0; fi
+  local pid; pid="$(cat "$PIDFILE")"
+  kill -INT "$pid" 2>/dev/null || true
+  for _ in $(seq 1 15); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+  kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+  rm -f "$PIDFILE"; echo "stopped."
+}
+
+cmd_status() {
+  if vm_running; then echo "VM:     running (pid $(cat "$PIDFILE"))"; else echo "VM:     stopped"; fi
+  if curl -s --max-time 4 --unix-socket "$DOCKER_SOCK" http://localhost/_ping 2>/dev/null | grep -q OK; then
+    local v; v="$(curl -s --unix-socket "$DOCKER_SOCK" http://localhost/version 2>/dev/null \
+      | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["Version"],d["Os"]+"/"+d["Arch"])' 2>/dev/null)"
+    echo "Docker: up ($v)"
+  else
+    echo "Docker: unreachable"
+  fi
+}
+
+cmd_exec() {
+  [ $# -gt 0 ] || { echo "usage: orb exec <command...>"; exit 1; }
+  curl -s --max-time 125 --unix-socket "$AGENT_SOCK" -X POST --data-binary "$*" http://localhost/ \
+    || { echo "guest agent unreachable (is the VM started?)"; exit 1; }
+}
+
+cmd_shell() {
+  echo "openorb guest shell — type commands, 'exit' to quit"
+  while true; do printf 'guest$ '; IFS= read -r line || break; [ "$line" = exit ] && break; [ -z "$line" ] && continue; cmd_exec "$line"; done
+}
+
+cmd_env() { echo "export DOCKER_HOST=unix://$DOCKER_SOCK"; }
+
+cmd_docker() { DOCKER_HOST="unix://$DOCKER_SOCK" docker "$@"; }
+
+cmd_logs() { tail -f "$CONSOLE_LOG"; }
+
+cmd_build_image() { (cd "$HERE" && ./make-image.sh); }
+
+case "${1:-help}" in
+  start)        shift; cmd_start "$@";;
+  stop)         shift; cmd_stop "$@";;
+  restart)      shift; cmd_stop; cmd_start "$@";;
+  status)       shift; cmd_status "$@";;
+  exec)         shift; cmd_exec "$@";;
+  shell)        shift; cmd_shell "$@";;
+  docker)       shift; cmd_docker "$@";;
+  env)          shift; cmd_env "$@";;
+  logs)         shift; cmd_logs "$@";;
+  build-image)  shift; cmd_build_image "$@";;
+  help|-h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//';;
+  *) echo "unknown command: $1"; echo "run 'orb help'"; exit 1;;
+esac
