@@ -25,6 +25,8 @@ struct Config {
     var memoryBytes: UInt64
     /// Host directories shared into the guest via VirtioFS (Stage 2).
     var mounts: [Mount]
+    /// Share Rosetta into the guest so x86-64 binaries/containers run (Stage 2).
+    var rosetta: Bool
     /// vsock port inside the guest where dockerd is exposed (see guest/ setup).
     var guestVsockPort: UInt32
     /// Unix socket on macOS that the Docker CLI will talk to.
@@ -66,6 +68,8 @@ struct Config {
           --mount <hostdir>[:tag]  Share a host dir into the guest (repeatable).
                                    Default tag for the first mount is "mac"
                                    (the guest mounts it at /mnt/<tag>).
+          --rosetta                Share Rosetta into the guest so x86-64 images
+                                   run via translation (installs Rosetta if needed).
 
         DOCKER PROJECTION:
           --vsock-port <n>         Guest vsock port serving dockerd (default: 2375)
@@ -91,6 +95,7 @@ struct Config {
         var disk: URL?
         var seed: URL?
         var mounts: [Mount] = []
+        var rosetta = false
         var consoleLog: URL?
         var nvram: URL?
         var kernel: URL?
@@ -112,6 +117,7 @@ struct Config {
             case "--disk":       disk = URL(fileURLWithPath: try need(arg))
             case "--seed":       seed = URL(fileURLWithPath: try need(arg))
             case "--mount":      mounts.append(try parseMount(need(arg), index: mounts.count))
+            case "--rosetta":    rosetta = true
             case "--console-log": consoleLog = URL(fileURLWithPath: try need(arg))
             case "--nvram":      nvram = URL(fileURLWithPath: try need(arg))
             case "--kernel":     kernel = URL(fileURLWithPath: try need(arg))
@@ -142,6 +148,7 @@ struct Config {
             cpuCount: cpus,
             memoryBytes: UInt64(memGiB * 1024 * 1024 * 1024),
             mounts: mounts,
+            rosetta: rosetta,
             guestVsockPort: vsockPort,
             hostSocketPath: socketPath,
             serialConsole: console,

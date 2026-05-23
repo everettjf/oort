@@ -28,7 +28,12 @@ enum VMConfig {
         vm.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         vm.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
         vm.socketDevices = [VZVirtioSocketDeviceConfiguration()]
-        vm.directorySharingDevices = try cfg.mounts.map { try makeShare($0) }
+
+        var shares: [VZDirectorySharingDeviceConfiguration] = try cfg.mounts.map { try makeShare($0) }
+        if cfg.rosetta {
+            shares.append(try makeRosettaShare())
+        }
+        vm.directorySharingDevices = shares
 
         if let logURL = cfg.consoleLog {
             vm.serialPorts = [try makeConsoleToFile(logURL)]
@@ -94,6 +99,37 @@ enum VMConfig {
         let shared = VZSharedDirectory(url: m.host, readOnly: m.readOnly)
         device.share = VZSingleDirectoryShare(directory: shared)
         Log.info("virtiofs share: \(m.host.path) → tag '\(m.tag)'\(m.readOnly ? " (ro)" : "")")
+        return device
+    }
+
+    /// Rosetta is shared into the guest under the special tag "rosetta"; the
+    /// guest registers it with binfmt_misc so x86-64 ELF binaries (incl. inside
+    /// amd64 containers) are translated. Installs Rosetta on demand if missing.
+    private static func makeRosettaShare() throws -> VZDirectorySharingDeviceConfiguration {
+        switch VZLinuxRosettaDirectoryShare.availability {
+        case .notSupported:
+            throw CLIError.runtime("Rosetta is not supported on this Mac (Apple Silicon required).")
+        case .notInstalled:
+            Log.info("installing Rosetta (one-time)…")
+            let sem = DispatchSemaphore(value: 0)
+            var installError: Error?
+            VZLinuxRosettaDirectoryShare.installRosetta { error in
+                installError = error
+                sem.signal()
+            }
+            sem.wait()
+            if let installError {
+                throw CLIError.runtime("Rosetta install failed: \(installError.localizedDescription). "
+                    + "Try: softwareupdate --install-rosetta --agree-to-license")
+            }
+        case .installed:
+            break
+        @unknown default:
+            break
+        }
+        let device = VZVirtioFileSystemDeviceConfiguration(tag: "rosetta")
+        device.share = try VZLinuxRosettaDirectoryShare()
+        Log.info("rosetta share enabled (tag 'rosetta')")
         return device
     }
 
