@@ -116,11 +116,24 @@ final class DockerSocketProxy {
         let box = VZVirtioSocketConnectionBox(connection)
         lock.lock(); liveConnections.insert(box); lock.unlock()
 
+        // When EITHER direction finishes (EOF or error), tear down BOTH fds so
+        // the other relay's blocking read() is woken immediately. Without this,
+        // an HTTP keep-alive peer that never sends EOF would leave one relay
+        // blocked forever, leaking the fd and the vsock connection — which
+        // eventually exhausts the virtio-socket device and wedges the proxy.
+        let teardownOnce = OnceFlag()
+        let teardown = {
+            teardownOnce.run {
+                shutdown(clientFD, SHUT_RDWR)
+                shutdown(guestFD, SHUT_RDWR)
+            }
+        }
+
         let done = DispatchGroup()
         done.enter(); done.enter()
 
-        relay(from: clientFD, to: guestFD) { done.leave() }   // CLI → guest
-        relay(from: guestFD, to: clientFD) { done.leave() }   // guest → CLI
+        relay(from: clientFD, to: guestFD) { teardown(); done.leave() }   // CLI → guest
+        relay(from: guestFD, to: clientFD) { teardown(); done.leave() }   // guest → CLI
 
         done.notify(queue: .global()) { [weak self] in
             close(clientFD)
@@ -129,8 +142,9 @@ final class DockerSocketProxy {
         }
     }
 
-    /// Copy bytes one direction until EOF/error, then half-close the destination
-    /// so the peer observes EOF too.
+    /// Copy bytes one direction until EOF/error, then run `onClose` (which tears
+    /// down both fds). Full-duplex teardown — not a half-close — so neither relay
+    /// can block indefinitely on a keep-alive connection.
     private func relay(from src: Int32, to dst: Int32, onClose: @escaping () -> Void) {
         Thread.detachNewThread {
             let bufSize = 64 * 1024
@@ -148,11 +162,23 @@ final class DockerSocketProxy {
                 }
                 if off < n { break }
             }
-            shutdown(dst, SHUT_WR)
         }
     }
 
     private func errnoString() -> String { String(cString: strerror(errno)) }
+}
+
+/// Runs a closure at most once, thread-safely.
+private final class OnceFlag {
+    private var done = false
+    private let lock = NSLock()
+    func run(_ body: () -> Void) {
+        lock.lock()
+        let first = !done
+        done = true
+        lock.unlock()
+        if first { body() }
+    }
 }
 
 /// Hashable wrapper so we can hold strong references to live connections in a Set.
