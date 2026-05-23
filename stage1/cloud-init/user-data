@@ -1,27 +1,111 @@
 #cloud-config
-# First-boot provisioning for the openorb guest:
-#   - install Docker + socat
-#   - expose dockerd on vsock:2375 (the host proxy connects here)
-#   - mount the host's VirtioFS share at /mnt/mac (Stage 2)
-# No manual login needed; cloud-init runs this as root.
+# First-boot provisioning for the openorb guest — APT-FREE on purpose.
+#
+# Distro package mirrors (ports.ubuntu.com) proved slow/flaky, and OrbStack
+# itself ships its own Docker tooling rather than apt-installing it. So we:
+#   - disable IPv6 (the VZ NAT resolver returns IPv6-only mirror addresses
+#     while the guest is IPv4-only, which stalls every download)
+#   - install the static Docker engine straight from download.docker.com
+#   - bridge dockerd onto vsock:2375 with a tiny Python forwarder (no socat)
+#   - mount the VirtioFS shares and register Rosetta for x86-64 (Stage 2)
+# Everything here uses only what the base Ubuntu cloud image already provides
+# (python3, curl, tar), so there is no dependency on apt at boot time.
 
 password: openorb
 chpasswd:
   expire: false
 ssh_pwauth: true
 
-package_update: true
-packages:
-  - docker.io
-  - socat
+# Disable IPv6 early so all name resolution / downloads go over IPv4.
+bootcmd:
+  - [ sysctl, -w, net.ipv6.conf.all.disable_ipv6=1 ]
+  - [ sysctl, -w, net.ipv6.conf.default.disable_ipv6=1 ]
 
 write_files:
-  # The VZ NAT resolver hands back IPv6 mirror addresses, but the guest only
-  # has IPv4 connectivity — so apt stalls on IPv6 timeouts. Force IPv4.
-  - path: /etc/apt/apt.conf.d/99force-ipv4
+  # Static Docker engine installer (single tarball from Docker's CDN, IPv4).
+  - path: /usr/local/bin/openorb-install-docker.sh
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -e
+      V=27.3.1
+      [ -x /usr/local/bin/dockerd ] && exit 0
+      cd /tmp
+      # Prefer a tarball staged on the VirtioFS share (host-downloaded, reliable);
+      # fall back to Docker's CDN over IPv4 if it isn't there.
+      if [ -f "/mnt/mac/docker-${V}.tgz" ]; then
+        cp "/mnt/mac/docker-${V}.tgz" docker.tgz
+      else
+        mountpoint -q /mnt/mac || { mkdir -p /mnt/mac; mount -t virtiofs mac /mnt/mac || true; }
+        if [ -f "/mnt/mac/docker-${V}.tgz" ]; then
+          cp "/mnt/mac/docker-${V}.tgz" docker.tgz
+        else
+          curl --ipv4 -fL --retry 3 --connect-timeout 15 --max-time 300 \
+            -o docker.tgz "https://download.docker.com/linux/static/stable/aarch64/docker-${V}.tgz"
+        fi
+      fi
+      tar xzf docker.tgz
+      install -m0755 docker/* /usr/local/bin/
+      rm -rf docker docker.tgz
+      echo "openorb: docker ${V} installed"
+
+  # dockerd unit (static binaries bring their own containerd/runc on PATH).
+  # --iptables=false avoids needing the iptables package; container outbound
+  # NAT is wired up properly in a later stage.
+  - path: /etc/systemd/system/docker.service
     permissions: "0644"
     content: |
-      Acquire::ForceIPv4 "true";
+      [Unit]
+      Description=openorb Docker Engine (static)
+      After=network-online.target
+      Wants=network-online.target
+      [Service]
+      ExecStart=/usr/local/bin/dockerd --iptables=false
+      Restart=always
+      RestartSec=2
+      Delegate=yes
+      [Install]
+      WantedBy=multi-user.target
+
+  # vsock:2375 -> /run/docker.sock bridge, in pure Python (replaces socat).
+  - path: /usr/local/bin/openorb-vsock-docker.py
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env python3
+      import socket, threading
+      LISTEN_PORT = 2375
+      DOCKER_SOCK = "/run/docker.sock"
+      def pump(src, dst):
+          try:
+              while True:
+                  data = src.recv(65536)
+                  if not data:
+                      break
+                  dst.sendall(data)
+          except OSError:
+              pass
+          finally:
+              try: dst.shutdown(socket.SHUT_WR)
+              except OSError: pass
+      def handle(vs):
+          try:
+              us = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+              us.connect(DOCKER_SOCK)
+          except OSError:
+              vs.close(); return
+          a = threading.Thread(target=pump, args=(vs, us), daemon=True)
+          b = threading.Thread(target=pump, args=(us, vs), daemon=True)
+          a.start(); b.start(); a.join(); b.join()
+          vs.close(); us.close()
+      s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+      s.bind((socket.VMADDR_CID_ANY, LISTEN_PORT))
+      s.listen(128)
+      while True:
+          try:
+              conn, _ = s.accept()
+          except OSError:
+              continue
+          threading.Thread(target=handle, args=(conn,), daemon=True).start()
   - path: /etc/systemd/system/openorb-docker-vsock.service
     permissions: "0644"
     content: |
@@ -30,15 +114,64 @@ write_files:
       After=docker.service
       Requires=docker.service
       [Service]
-      ExecStart=/usr/bin/socat VSOCK-LISTEN:2375,fork,reuseaddr UNIX-CONNECT:/run/docker.sock
+      ExecStart=/usr/bin/python3 /usr/local/bin/openorb-vsock-docker.py
       Restart=always
       RestartSec=1
+      # Keep the host's lifeline to dockerd alive under memory pressure.
+      OOMScoreAdjust=-800
       [Install]
       WantedBy=multi-user.target
+
+  # openorb guest agent: exec-over-vsock on port 2376. Powers `orb exec` and
+  # headless diagnostics. OOM-protected so it stays reachable under pressure.
+  - path: /usr/local/bin/openorb-agent.py
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env python3
+      import socket, subprocess, threading
+      def handle(c):
+          c.settimeout(8); data=b""
+          try:
+              while b"\r\n\r\n" not in data:
+                  ch=c.recv(4096)
+                  if not ch: break
+                  data+=ch
+              hdr,_,body=data.partition(b"\r\n\r\n"); cl=0
+              for line in hdr.split(b"\r\n"):
+                  if line.lower().startswith(b"content-length:"): cl=int(line.split(b":")[1])
+              while len(body)<cl:
+                  ch=c.recv(4096)
+                  if not ch: break
+                  body+=ch
+              cmd=body.decode(errors="replace").strip() or "echo hi"
+              r=subprocess.run(cmd,shell=True,capture_output=True,timeout=120,text=True)
+              out=(r.stdout+r.stderr).encode()
+              c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n"%len(out)+out)
+          except Exception as e:
+              try: c.sendall(b"HTTP/1.1 500 E\r\nConnection: close\r\n\r\n"+str(e).encode())
+              except OSError: pass
+          finally: c.close()
+      s=socket.socket(socket.AF_VSOCK,socket.SOCK_STREAM); s.bind((socket.VMADDR_CID_ANY,2376)); s.listen(16)
+      while True:
+          try: c,_=s.accept()
+          except OSError: continue
+          threading.Thread(target=handle,args=(c,),daemon=True).start()
+  - path: /etc/systemd/system/openorb-agent.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=openorb guest agent (exec over vsock)
+      [Service]
+      ExecStart=/usr/bin/python3 /usr/local/bin/openorb-agent.py
+      Restart=always
+      OOMScoreAdjust=-1000
+      [Install]
+      WantedBy=multi-user.target
+
   # Register Rosetta with binfmt_misc so x86-64 ELF (incl. amd64 containers)
-  # is translated. printf %s writes the literal \xHH magic; the kernel decodes it.
-  # The "F" flag opens the interpreter at registration time, so it works across
-  # the mount namespaces Docker containers run in.
+  # is translated. printf %s writes the literal \xHH magic; the kernel decodes
+  # it. The "F" flag opens the interpreter at registration time, so it works
+  # across the mount namespaces Docker containers run in.
   - path: /usr/local/bin/openorb-rosetta.sh
     permissions: "0755"
     content: |
@@ -54,7 +187,6 @@ write_files:
     content: |
       [Unit]
       Description=openorb: register Rosetta binfmt_misc
-      After=mnt-rosetta.mount
       [Service]
       Type=oneshot
       ExecStart=/usr/local/bin/openorb-rosetta.sh
@@ -62,18 +194,24 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
-# Mount the VirtioFS share (tag "mac") the host attaches via --mount.
-# nofail: if no share is attached this boot, don't block startup.
-mounts:
-  - [ "mac", "/mnt/mac", "virtiofs", "rw,nofail", "0", "0" ]
-  - [ "rosetta", "/mnt/rosetta", "virtiofs", "ro,nofail", "0", "0" ]
-
+# Bring Docker + the vsock bridge up first, then mount the VirtioFS shares.
+# Mounting is done here (not the cloud-init `mounts` module) so it can never
+# block bring-up; fstab entries are added for later boots.
 runcmd:
+  # Use a static IPv4 resolver. Disabling IPv6 (above) upsets systemd-resolved's
+  # stub at 127.0.0.53; bypass it so Docker image pulls resolve reliably.
+  - systemctl disable --now systemd-resolved 2>/dev/null || true
+  - rm -f /etc/resolv.conf
+  - printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\noptions single-request\n' > /etc/resolv.conf
   - systemctl daemon-reload
-  - systemctl enable --now docker
+  - systemctl enable --now openorb-agent.service
+  - /usr/local/bin/openorb-install-docker.sh
+  - systemctl enable --now docker.service
   - systemctl enable --now openorb-docker-vsock.service
   - mkdir -p /mnt/mac /mnt/rosetta
   - mount -t virtiofs mac /mnt/mac || true
   - mount -t virtiofs rosetta /mnt/rosetta || true
+  - grep -q '/mnt/mac' /etc/fstab || echo 'mac /mnt/mac virtiofs rw,nofail 0 0' >> /etc/fstab
+  - grep -q '/mnt/rosetta' /etc/fstab || echo 'rosetta /mnt/rosetta virtiofs ro,nofail 0 0' >> /etc/fstab
   - systemctl enable --now openorb-rosetta.service || true
   - touch /run/openorb-ready
