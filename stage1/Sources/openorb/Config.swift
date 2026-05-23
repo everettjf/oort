@@ -27,6 +27,9 @@ struct Config {
     var mounts: [Mount]
     /// Share Rosetta into the guest so x86-64 binaries/containers run (Stage 2).
     var rosetta: Bool
+    /// Extra vsock forwards: a host Unix socket ⇄ a guest vsock port (Stage 3).
+    struct Forward { var socketPath: String; var guestPort: UInt32 }
+    var forwards: [Forward]
     /// vsock port inside the guest where dockerd is exposed (see guest/ setup).
     var guestVsockPort: UInt32
     /// Unix socket on macOS that the Docker CLI will talk to.
@@ -74,6 +77,8 @@ struct Config {
         DOCKER PROJECTION:
           --vsock-port <n>         Guest vsock port serving dockerd (default: 2375)
           --socket <path>          Host Unix socket (default: ~/.openorb/docker.sock)
+          --forward <sock>:<port>  Extra host-socket ⇄ guest-vsock-port forward
+                                   (repeatable; e.g. a debug agent on port 2376).
 
         MISC:
           --no-console             Don't attach the guest serial console to stdio
@@ -96,6 +101,7 @@ struct Config {
         var seed: URL?
         var mounts: [Mount] = []
         var rosetta = false
+        var forwards: [Forward] = []
         var consoleLog: URL?
         var nvram: URL?
         var kernel: URL?
@@ -118,6 +124,7 @@ struct Config {
             case "--seed":       seed = URL(fileURLWithPath: try need(arg))
             case "--mount":      mounts.append(try parseMount(need(arg), index: mounts.count))
             case "--rosetta":    rosetta = true
+            case "--forward":    forwards.append(try parseForward(need(arg)))
             case "--console-log": consoleLog = URL(fileURLWithPath: try need(arg))
             case "--nvram":      nvram = URL(fileURLWithPath: try need(arg))
             case "--kernel":     kernel = URL(fileURLWithPath: try need(arg))
@@ -149,6 +156,7 @@ struct Config {
             memoryBytes: UInt64(memGiB * 1024 * 1024 * 1024),
             mounts: mounts,
             rosetta: rosetta,
+            forwards: forwards,
             guestVsockPort: vsockPort,
             hostSocketPath: socketPath,
             serialConsole: console,
@@ -168,6 +176,16 @@ struct Config {
         let tag = (parts.count > 1 && !parts[1].isEmpty) ? parts[1] : (index == 0 ? "mac" : "share\(index)")
         let readOnly = parts.count > 2 && parts[2] == "ro"
         return Mount(host: host, tag: tag, readOnly: readOnly)
+    }
+
+    /// Parse `--forward <hostSocketPath>:<guestVsockPort>`.
+    private static func parseForward(_ spec: String) throws -> Forward {
+        guard let idx = spec.lastIndex(of: ":"),
+              let port = UInt32(spec[spec.index(after: idx)...]) else {
+            throw CLIError.usage("--forward must be <hostSocketPath>:<guestVsockPort>")
+        }
+        let path = String(spec[..<idx])
+        return Forward(socketPath: (path as NSString).expandingTildeInPath, guestPort: port)
     }
 }
 

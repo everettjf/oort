@@ -8,7 +8,7 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
     private let cfg: Config
     private let vmQueue = DispatchQueue(label: "dev.openorb.vm")
     private var vm: VZVirtualMachine!
-    private var proxy: DockerSocketProxy?
+    private var proxies: [DockerSocketProxy] = []
 
     init(_ cfg: Config) { self.cfg = cfg }
 
@@ -41,19 +41,26 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
             Log.error("no virtio-socket device on the VM")
             return
         }
-        let proxy = DockerSocketProxy(
-            socketPath: cfg.hostSocketPath,
-            guestPort: cfg.guestVsockPort,
-            vmQueue: vmQueue,
-            socketDevice: device
-        )
-        do {
-            try proxy.start()
-            self.proxy = proxy
-            printReadyBanner()
-        } catch {
-            Log.error("failed to start docker socket proxy: \(error)")
+        // The Docker socket plus any extra --forward targets are all just
+        // host-Unix-socket ⇄ guest-vsock-port tunnels.
+        var targets: [Config.Forward] = [.init(socketPath: cfg.hostSocketPath, guestPort: cfg.guestVsockPort)]
+        targets.append(contentsOf: cfg.forwards)
+
+        for t in targets {
+            let proxy = DockerSocketProxy(
+                socketPath: t.socketPath,
+                guestPort: t.guestPort,
+                vmQueue: vmQueue,
+                socketDevice: device
+            )
+            do {
+                try proxy.start()
+                proxies.append(proxy)
+            } catch {
+                Log.error("failed to start forward \(t.socketPath) → vsock:\(t.guestPort): \(error)")
+            }
         }
+        printReadyBanner()
     }
 
     private func printReadyBanner() {
