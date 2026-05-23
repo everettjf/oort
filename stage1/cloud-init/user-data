@@ -47,6 +47,8 @@ write_files:
       tar xzf docker.tgz
       install -m0755 docker/* /usr/local/bin/
       rm -rf docker docker.tgz
+      # Stage the compiled guest agent from the share.
+      [ -f /mnt/mac/openorb-guest ] && install -m0755 /mnt/mac/openorb-guest /usr/local/bin/openorb-guest
       echo "openorb: docker ${V} installed"
 
   # dockerd unit (static binaries bring their own containerd/runc on PATH).
@@ -67,104 +69,22 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
-  # vsock:2375 -> /run/docker.sock bridge, in pure Python (replaces socat).
-  - path: /usr/local/bin/openorb-vsock-docker.py
-    permissions: "0755"
-    content: |
-      #!/usr/bin/env python3
-      import socket, threading
-      LISTEN_PORT = 2375
-      DOCKER_SOCK = "/run/docker.sock"
-      def pump(src, dst):
-          try:
-              while True:
-                  data = src.recv(65536)
-                  if not data:
-                      break
-                  dst.sendall(data)
-          except OSError:
-              pass
-          finally:
-              try: dst.shutdown(socket.SHUT_WR)
-              except OSError: pass
-      def handle(vs):
-          try:
-              us = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-              us.connect(DOCKER_SOCK)
-          except OSError:
-              vs.close(); return
-          a = threading.Thread(target=pump, args=(vs, us), daemon=True)
-          b = threading.Thread(target=pump, args=(us, vs), daemon=True)
-          a.start(); b.start(); a.join(); b.join()
-          vs.close(); us.close()
-      s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-      s.bind((socket.VMADDR_CID_ANY, LISTEN_PORT))
-      s.listen(128)
-      while True:
-          try:
-              conn, _ = s.accept()
-          except OSError:
-              continue
-          threading.Thread(target=handle, args=(conn,), daemon=True).start()
-  - path: /etc/systemd/system/openorb-docker-vsock.service
+  # openorb-guest: one compiled Go binary (staged on the share) that serves
+  # both the Docker vsock bridge (2375 -> /run/docker.sock) and the exec agent
+  # (2376). Replaces the earlier Python services, which were fragile under load.
+  - path: /etc/systemd/system/openorb-guest.service
     permissions: "0644"
     content: |
       [Unit]
-      Description=openorb: forward vsock:2375 to the Docker socket
+      Description=openorb guest agent (docker vsock bridge + exec)
       After=docker.service
-      Requires=docker.service
+      Wants=docker.service
       [Service]
-      ExecStart=/usr/bin/python3 /usr/local/bin/openorb-vsock-docker.py
+      ExecStart=/usr/local/bin/openorb-guest
       Restart=always
       RestartSec=1
       # Keep the host's lifeline to dockerd alive under memory pressure.
-      OOMScoreAdjust=-800
-      [Install]
-      WantedBy=multi-user.target
-
-  # openorb guest agent: exec-over-vsock on port 2376. Powers `orb exec` and
-  # headless diagnostics. OOM-protected so it stays reachable under pressure.
-  - path: /usr/local/bin/openorb-agent.py
-    permissions: "0755"
-    content: |
-      #!/usr/bin/env python3
-      import socket, subprocess, threading
-      def handle(c):
-          c.settimeout(8); data=b""
-          try:
-              while b"\r\n\r\n" not in data:
-                  ch=c.recv(4096)
-                  if not ch: break
-                  data+=ch
-              hdr,_,body=data.partition(b"\r\n\r\n"); cl=0
-              for line in hdr.split(b"\r\n"):
-                  if line.lower().startswith(b"content-length:"): cl=int(line.split(b":")[1])
-              while len(body)<cl:
-                  ch=c.recv(4096)
-                  if not ch: break
-                  body+=ch
-              cmd=body.decode(errors="replace").strip() or "echo hi"
-              r=subprocess.run(cmd,shell=True,capture_output=True,timeout=120,text=True)
-              out=(r.stdout+r.stderr).encode()
-              c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n"%len(out)+out)
-          except Exception as e:
-              try: c.sendall(b"HTTP/1.1 500 E\r\nConnection: close\r\n\r\n"+str(e).encode())
-              except OSError: pass
-          finally: c.close()
-      s=socket.socket(socket.AF_VSOCK,socket.SOCK_STREAM); s.bind((socket.VMADDR_CID_ANY,2376)); s.listen(16)
-      while True:
-          try: c,_=s.accept()
-          except OSError: continue
-          threading.Thread(target=handle,args=(c,),daemon=True).start()
-  - path: /etc/systemd/system/openorb-agent.service
-    permissions: "0644"
-    content: |
-      [Unit]
-      Description=openorb guest agent (exec over vsock)
-      [Service]
-      ExecStart=/usr/bin/python3 /usr/local/bin/openorb-agent.py
-      Restart=always
-      OOMScoreAdjust=-1000
+      OOMScoreAdjust=-900
       [Install]
       WantedBy=multi-user.target
 
@@ -204,14 +124,15 @@ runcmd:
   - rm -f /etc/resolv.conf
   - printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\noptions single-request\n' > /etc/resolv.conf
   - systemctl daemon-reload
-  - systemctl enable --now openorb-agent.service
+  # install-docker.sh mounts /mnt/mac, installs the static Docker engine, and
+  # stages the openorb-guest binary from the share.
   - /usr/local/bin/openorb-install-docker.sh
-  - systemctl enable --now docker.service
-  - systemctl enable --now openorb-docker-vsock.service
   - mkdir -p /mnt/mac /mnt/rosetta
   - mount -t virtiofs mac /mnt/mac || true
   - mount -t virtiofs rosetta /mnt/rosetta || true
   - grep -q '/mnt/mac' /etc/fstab || echo 'mac /mnt/mac virtiofs rw,nofail 0 0' >> /etc/fstab
   - grep -q '/mnt/rosetta' /etc/fstab || echo 'rosetta /mnt/rosetta virtiofs ro,nofail 0 0' >> /etc/fstab
+  - systemctl enable --now docker.service
+  - systemctl enable --now openorb-guest.service
   - systemctl enable --now openorb-rosetta.service || true
   - touch /run/openorb-ready

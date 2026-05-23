@@ -15,6 +15,11 @@ SIZE="${SIZE:-12G}"
 
 [ -f "$SRC" ] || { echo "missing $SRC — download the Ubuntu arm64 cloud image first"; exit 1; }
 
+echo "==> build openorb-guest (Go, linux/arm64) into the share"
+mkdir -p share
+( cd guest-agent && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 GOFLAGS=-mod=mod \
+    go build -ldflags="-s -w" -o ../share/openorb-guest . )
+
 echo "==> convert qcow2 → raw"
 qemu-img convert -f qcow2 -O raw "$SRC" "$DISK"
 
