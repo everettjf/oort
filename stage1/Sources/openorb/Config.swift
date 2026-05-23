@@ -30,6 +30,8 @@ struct Config {
     /// Extra vsock forwards: a host Unix socket ⇄ a guest vsock port (Stage 3).
     struct Forward { var socketPath: String; var guestPort: UInt32 }
     var forwards: [Forward]
+    /// Auto-forward container-published ports to the macOS localhost (Stage 3).
+    var portForward: Bool
     /// vsock port inside the guest where dockerd is exposed (see guest/ setup).
     var guestVsockPort: UInt32
     /// Unix socket on macOS that the Docker CLI will talk to.
@@ -79,6 +81,7 @@ struct Config {
           --socket <path>          Host Unix socket (default: ~/.openorb/docker.sock)
           --forward <sock>:<port>  Extra host-socket ⇄ guest-vsock-port forward
                                    (repeatable; e.g. a debug agent on port 2376).
+          --no-port-forward        Don't auto-forward container ports to localhost.
 
         MISC:
           --no-console             Don't attach the guest serial console to stdio
@@ -102,6 +105,7 @@ struct Config {
         var mounts: [Mount] = []
         var rosetta = false
         var forwards: [Forward] = []
+        var portForward = true
         var consoleLog: URL?
         var nvram: URL?
         var kernel: URL?
@@ -125,6 +129,7 @@ struct Config {
             case "--mount":      mounts.append(try parseMount(need(arg), index: mounts.count))
             case "--rosetta":    rosetta = true
             case "--forward":    forwards.append(try parseForward(need(arg)))
+            case "--no-port-forward": portForward = false
             case "--console-log": consoleLog = URL(fileURLWithPath: try need(arg))
             case "--nvram":      nvram = URL(fileURLWithPath: try need(arg))
             case "--kernel":     kernel = URL(fileURLWithPath: try need(arg))
@@ -157,6 +162,7 @@ struct Config {
             mounts: mounts,
             rosetta: rosetta,
             forwards: forwards,
+            portForward: portForward,
             guestVsockPort: vsockPort,
             hostSocketPath: socketPath,
             serialConsole: console,

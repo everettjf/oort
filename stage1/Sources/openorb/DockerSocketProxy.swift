@@ -169,7 +169,7 @@ final class DockerSocketProxy {
 }
 
 /// Runs a closure at most once, thread-safely.
-private final class OnceFlag {
+final class OnceFlag {
     private var done = false
     private let lock = NSLock()
     func run(_ body: () -> Void) {

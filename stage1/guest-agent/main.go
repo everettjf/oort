@@ -24,22 +24,25 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 
 	"golang.org/x/sys/unix"
 )
 
 const (
-	dockerPort = 2375
-	agentPort  = 2376
-	dockerSock = "/run/docker.sock"
+	dockerPort  = 2375
+	agentPort   = 2376
+	forwardPort = 2377
+	dockerSock  = "/run/docker.sock"
 )
 
 func main() {
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() { defer wg.Done(); serve(dockerPort, handleDocker) }()
 	go func() { defer wg.Done(); serve(agentPort, handleExec) }()
+	go func() { defer wg.Done(); serve(forwardPort, handleTCPForward) }()
 	wg.Wait()
 }
 
@@ -90,6 +93,36 @@ func handleDocker(vconn *os.File) {
 	<-done
 	vconn.Close()
 	dconn.Close()
+	<-done
+}
+
+// handleTCPForward implements Stage 3 port forwarding. The host sends a single
+// line with the target ("8080" or "127.0.0.1:8080"); we dial it inside the guest
+// and splice. This is how a container's published port becomes reachable on the
+// macOS localhost: openorb listens on 127.0.0.1:P and tunnels here over vsock.
+func handleTCPForward(conn *os.File) {
+	defer conn.Close()
+	r := bufio.NewReader(conn)
+	line, err := r.ReadString('\n')
+	if err != nil {
+		return
+	}
+	target := strings.TrimSpace(line)
+	if !strings.Contains(target, ":") {
+		target = "127.0.0.1:" + target
+	}
+	dst, err := net.Dial("tcp", target)
+	if err != nil {
+		return
+	}
+	defer dst.Close()
+	done := make(chan struct{}, 2)
+	// r may hold bytes already read past the line; draining r (not conn) preserves them.
+	go func() { io.Copy(dst, r); done <- struct{}{} }()
+	go func() { io.Copy(conn, dst); done <- struct{}{} }()
+	<-done
+	conn.Close()
+	dst.Close()
 	<-done
 }
 

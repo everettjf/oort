@@ -9,6 +9,7 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
     private let vmQueue = DispatchQueue(label: "dev.openorb.vm")
     private var vm: VZVirtualMachine!
     private var proxies: [DockerSocketProxy] = []
+    private var portForwarder: PortForwarder?
 
     init(_ cfg: Config) { self.cfg = cfg }
 
@@ -59,6 +60,12 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
             } catch {
                 Log.error("failed to start forward \(t.socketPath) → vsock:\(t.guestPort): \(error)")
             }
+        }
+
+        if cfg.portForward {
+            let pf = PortForwarder(dockerSocketPath: cfg.hostSocketPath, vmQueue: vmQueue, socketDevice: device)
+            pf.start()
+            portForwarder = pf
         }
         printReadyBanner()
     }
