@@ -1,7 +1,8 @@
 #cloud-config
-# First-boot provisioning for the openorb Stage-1 guest:
+# First-boot provisioning for the openorb guest:
 #   - install Docker + socat
 #   - expose dockerd on vsock:2375 (the host proxy connects here)
+#   - mount the host's VirtioFS share at /mnt/mac (Stage 2)
 # No manual login needed; cloud-init runs this as root.
 
 password: openorb
@@ -35,8 +36,15 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
+# Mount the VirtioFS share (tag "mac") the host attaches via --mount.
+# nofail: if no share is attached this boot, don't block startup.
+mounts:
+  - [ "mac", "/mnt/mac", "virtiofs", "rw,nofail", "0", "0" ]
+
 runcmd:
   - systemctl daemon-reload
   - systemctl enable --now docker
   - systemctl enable --now openorb-docker-vsock.service
+  - mkdir -p /mnt/mac
+  - mount -t virtiofs mac /mnt/mac || true
   - touch /run/openorb-ready
