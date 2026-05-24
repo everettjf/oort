@@ -39,7 +39,12 @@ vm_running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 
 cmd_start() {
   if vm_running; then echo "openorb already running (pid $(cat "$PIDFILE"))"; return 0; fi
+  rm -f "$PIDFILE"   # clear any stale pidfile from a crashed/old run
   [ -f "$DISK" ] || { echo "no disk image at $DISK — run 'orb build-image' first"; exit 1; }
+  # Guard against a leftover VM still holding the disk image.
+  if pgrep -f "openorb run .*$DISK" >/dev/null 2>&1; then
+    echo "another openorb VM is still using $DISK; run 'orb stop' or kill it first"; exit 1
+  fi
   local b; b="$(bin)"
   rm -f "$DOCKER_SOCK" "$AGENT_SOCK"
   echo "starting openorb VM…"
@@ -52,7 +57,9 @@ cmd_start() {
   echo $! > "$PIDFILE"
   printf "waiting for Docker"
   for _ in $(seq 1 60); do
-    if curl -s --max-time 4 --unix-socket "$DOCKER_SOCK" http://localhost/_ping 2>/dev/null | grep -q OK; then
+    # Wait for /version, not just /_ping: _ping goes green a moment before the
+    # daemon can actually create containers, which races the first `docker run`.
+    if curl -s --max-time 4 --unix-socket "$DOCKER_SOCK" http://localhost/version 2>/dev/null | grep -q '"ApiVersion"'; then
       echo " ready."; echo; cmd_env; return 0
     fi
     printf "."; sleep 2
@@ -61,12 +68,20 @@ cmd_start() {
 }
 
 cmd_stop() {
-  if ! vm_running; then echo "openorb not running"; return 0; fi
+  if ! vm_running; then echo "openorb not running"; rm -f "$PIDFILE"; return 0; fi
   local pid; pid="$(cat "$PIDFILE")"
-  kill -INT "$pid" 2>/dev/null || true
-  for _ in $(seq 1 15); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
-  kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
-  rm -f "$PIDFILE"; echo "stopped."
+  printf "stopping (graceful)…"
+  kill -INT "$pid" 2>/dev/null || true   # → VZ requestStop → guest powers off
+  # Poll up to 30s; a healthy guest powers off in a couple of seconds. The
+  # longer window avoids force-killing a busy guest (which corrupts the disk
+  # and breaks the next boot's networking).
+  for _ in $(seq 1 60); do
+    kill -0 "$pid" 2>/dev/null || { echo " stopped."; rm -f "$PIDFILE"; return 0; }
+    sleep 0.5
+  done
+  echo " forcing."
+  kill -9 "$pid" 2>/dev/null || true
+  rm -f "$PIDFILE"
 }
 
 cmd_status() {
@@ -99,6 +114,38 @@ cmd_logs() { tail -f "$CONSOLE_LOG"; }
 
 cmd_build_image() { (cd "$HERE" && ./make-image.sh); }
 
+# Start openorb automatically at login via a per-user LaunchAgent.
+AUTOSTART_PLIST="$HOME/Library/LaunchAgents/dev.openorb.plist"
+cmd_autostart() {
+  case "${1:-}" in
+    enable)
+      mkdir -p "$(dirname "$AUTOSTART_PLIST")"
+      cat > "$AUTOSTART_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.openorb</string>
+  <key>ProgramArguments</key><array><string>$HERE/orb</string><string>start</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>$STATE/autostart.log</string>
+  <key>StandardErrorPath</key><string>$STATE/autostart.log</string>
+</dict>
+</plist>
+PLIST
+      launchctl unload "$AUTOSTART_PLIST" 2>/dev/null || true
+      launchctl load "$AUTOSTART_PLIST" 2>/dev/null || true
+      echo "autostart enabled (openorb will start at login)"
+      ;;
+    disable)
+      launchctl unload "$AUTOSTART_PLIST" 2>/dev/null || true
+      rm -f "$AUTOSTART_PLIST"
+      echo "autostart disabled"
+      ;;
+    *) [ -f "$AUTOSTART_PLIST" ] && echo "autostart: enabled" || echo "autostart: disabled (use 'orb autostart enable')";;
+  esac
+}
+
 case "${1:-help}" in
   start)        shift; cmd_start "$@";;
   stop)         shift; cmd_stop "$@";;
@@ -108,6 +155,7 @@ case "${1:-help}" in
   shell)        shift; cmd_shell "$@";;
   docker)       shift; cmd_docker "$@";;
   env)          shift; cmd_env "$@";;
+  autostart)    shift; cmd_autostart "$@";;
   logs)         shift; cmd_logs "$@";;
   build-image)  shift; cmd_build_image "$@";;
   help|-h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//';;

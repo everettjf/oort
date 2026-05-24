@@ -22,6 +22,14 @@ bootcmd:
   - [ sysctl, -w, net.ipv6.conf.default.disable_ipv6=1 ]
 
 write_files:
+  # Cap how long systemd waits on units at shutdown so `orb stop` powers off
+  # quickly and cleanly (a slow docker/unmount can otherwise hang shutdown for
+  # 90s+, forcing a kill that corrupts the disk and breaks the next boot).
+  - path: /etc/systemd/system.conf.d/10-openorb.conf
+    permissions: "0644"
+    content: |
+      [Manager]
+      DefaultTimeoutStopSec=8s
   # Static Docker engine installer (single tarball from Docker's CDN, IPv4).
   - path: /usr/local/bin/openorb-install-docker.sh
     permissions: "0755"
