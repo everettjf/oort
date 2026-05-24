@@ -37,6 +37,24 @@ bin() {
 
 vm_running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 
+# Make the guest follow the Mac's DNS resolvers, so containers can resolve
+# internal / VPN domains the way they do on the host. Non-loopback macOS
+# resolvers go first; 1.1.1.1 stays as a public fallback. Guest NAT routes the
+# DNS packets out through macOS, so VPN-reachable resolvers work too.
+sync_dns() {
+  local lines body b64
+  # IPv4 resolvers only (the guest has IPv6 disabled), not loopback; one
+  # "nameserver X" per line via sed (avoids any word-splitting pitfalls).
+  lines=$(scutil --dns 2>/dev/null | awk '/nameserver\[/{print $3}' \
+        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -vE '^(127\.|0\.0\.0\.0)' \
+        | awk '!seen[$0]++' | head -3 | sed 's/^/nameserver /')
+  body=$(printf '%s\nnameserver 1.1.1.1\noptions single-request\n' "$lines")
+  # base64 the multi-line content so it ships cleanly through the agent.
+  b64=$(printf '%s' "$body" | base64 | tr -d '\n')
+  curl -s --max-time 12 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
+    "echo $b64 | base64 -d > /etc/resolv.conf" http://localhost/ >/dev/null 2>&1 || true
+}
+
 # Mount the Mac home (VirtioFS tag "home") at the same absolute path inside the
 # guest, and persist it in fstab so later boots remount it without the agent.
 mount_home() {
@@ -73,6 +91,7 @@ cmd_start() {
     if curl -s --max-time 4 --unix-socket "$DOCKER_SOCK" http://localhost/version 2>/dev/null | grep -q '"ApiVersion"'; then
       echo " ready."
       mount_home
+      sync_dns
       echo; cmd_env; return 0
     fi
     printf "."; sleep 2
