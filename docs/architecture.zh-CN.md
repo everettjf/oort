@@ -1,5 +1,7 @@
 # 架构与原理
 
+[English](./architecture.md) | **简体中文**
+
 openorb 的目标是用最少的自研代码，复刻 OrbStack「Docker 跑在轻量 Linux VM 里、却像本地一样无缝」的核心体验。本文讲清楚每一层是怎么实现的。
 
 > 想了解 OrbStack 本身的实现原理与完整复刻路线，见仓库根目录的 **[orbstack-research.md](../orbstack-research.md)** 深度调研报告。

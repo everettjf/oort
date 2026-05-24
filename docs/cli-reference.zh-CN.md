@@ -1,5 +1,7 @@
 # 命令参考
 
+[English](./cli-reference.md) | **简体中文**
+
 包含 `orb` 命令行的全部子命令，以及底层引擎 `openorb run` 的全部参数。
 
 ## `orb` —— 命令行入口
