@@ -136,6 +136,14 @@ enum VMConfig {
     private static func makeNAT() -> VZVirtioNetworkDeviceConfiguration {
         let net = VZVirtioNetworkDeviceConfiguration()
         net.attachment = VZNATNetworkDeviceAttachment()
+        // Pin a stable MAC. Without this, VZ hands the NIC a fresh random MAC on
+        // every boot — but cloud-init's netplan matches the NIC by MAC, so on a
+        // reused disk the new MAC wouldn't match, the interface went unmanaged,
+        // and the guest had no network. A fixed (locally-administered) MAC keeps
+        // networking working across reboots.
+        if let mac = VZMACAddress(string: "0a:00:27:0b:00:01") {
+            net.macAddress = mac
+        }
         return net
     }
 
