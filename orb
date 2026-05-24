@@ -37,6 +37,14 @@ bin() {
 
 vm_running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 
+# Mount the Mac home (VirtioFS tag "home") at the same absolute path inside the
+# guest, and persist it in fstab so later boots remount it without the agent.
+mount_home() {
+  curl -s --max-time 15 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
+    "mkdir -p '$HOME'; grep -q ' $HOME virtiofs' /etc/fstab || echo 'home $HOME virtiofs rw,nofail 0 0' >> /etc/fstab; mountpoint -q '$HOME' || mount -t virtiofs home '$HOME'" \
+    http://localhost/ >/dev/null 2>&1 || true
+}
+
 cmd_start() {
   if vm_running; then echo "openorb already running (pid $(cat "$PIDFILE"))"; return 0; fi
   rm -f "$PIDFILE"   # clear any stale pidfile from a crashed/old run
@@ -48,9 +56,12 @@ cmd_start() {
   local b; b="$(bin)"
   rm -f "$DOCKER_SOCK" "$AGENT_SOCK"
   echo "starting openorb VM…"
+  # Share the Mac home at its real path inside the guest, so `docker -v $PWD:/x`
+  # works for any project under $HOME (OrbStack-style path mirroring), plus the
+  # repo's share dir at /mnt/mac (carries the provisioning artifacts).
   nohup "$b" run \
     --disk "$DISK" --seed "$SEED" \
-    --mount "$SHARE:mac" --rosetta \
+    --mount "$SHARE:mac" --mount "$HOME:home" --rosetta \
     --forward "$AGENT_SOCK:2376" \
     --no-console --console-log "$CONSOLE_LOG" \
     --socket "$DOCKER_SOCK" > "$STATE/vm.log" 2>&1 &
@@ -60,7 +71,9 @@ cmd_start() {
     # Wait for /version, not just /_ping: _ping goes green a moment before the
     # daemon can actually create containers, which races the first `docker run`.
     if curl -s --max-time 4 --unix-socket "$DOCKER_SOCK" http://localhost/version 2>/dev/null | grep -q '"ApiVersion"'; then
-      echo " ready."; echo; cmd_env; return 0
+      echo " ready."
+      mount_home
+      echo; cmd_env; return 0
     fi
     printf "."; sleep 2
   done
