@@ -157,4 +157,4 @@ kernel has it built in). Active ballooning (grow/reclaim on demand) is future wo
 | Memory | balloon device | dynamic allocation + zram |
 | Multi-machine / GUI | none | yes |
 
-See [orbstack-research.md](../orbstack-research.md) and the [CHANGELOG](../CHANGELOG.md).
+See [orbstack-research.md](../orbstack-research.md) for the full picture.

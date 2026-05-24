@@ -12,7 +12,6 @@ container engine, file sharing, x86 translation and port mapping onto macOS — 
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B%20·%20Apple%20Silicon-black)](#-requirements)
 [![Language](https://img.shields.io/badge/built%20with-Swift%20%2B%20Go-orange)](#-project-layout)
 [![License](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.1.0-green)](./CHANGELOG.md)
 
 **English** | [简体中文](./README.zh-CN.md)
 
@@ -43,7 +42,7 @@ $ docker run --platform linux/amd64 alpine uname -m     # x86_64 (via Rosetta)
 $ orb exec 'uname -a'             # run a command inside the guest
 ```
 
-### What works today, **verified on real hardware** (v0.1.0)
+### What works today, **verified on real hardware**
 
 | Capability | What it does | Status |
 |---|---|:---:|
@@ -117,7 +116,6 @@ The guest is a stock Ubuntu 24.04 cloud image, provisioned **without apt** on fi
 | [CLI reference](./docs/cli-reference.md) · [中文](./docs/cli-reference.zh-CN.md) | Every `orb` subcommand + all `openorb run` flags |
 | [FAQ](./docs/faq.md) · [中文](./docs/faq.zh-CN.md) | Troubleshooting (DNS, zram, provisioning, coexisting with Docker Desktop) |
 | [Research report](./orbstack-research.md) | OrbStack internals + clone roadmap (the project's origin) |
-| [Changelog](./CHANGELOG.md) | Version history |
 
 ---
 
