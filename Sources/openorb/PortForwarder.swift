@@ -26,13 +26,44 @@ final class PortForwarder {
 
     func start() {
         Log.info("port forwarding: watching Docker for published ports → 127.0.0.1")
-        Thread.detachNewThread { [weak self] in self?.pollLoop() }
+        // Event-driven: react instantly to container start/stop via the Docker
+        // /events stream. A slow timer is kept only as a safety net in case an
+        // event is ever missed (or the stream is mid-reconnect).
+        Thread.detachNewThread { [weak self] in self?.eventsLoop() }
+        Thread.detachNewThread { [weak self] in self?.safetyLoop() }
     }
 
-    private func pollLoop() {
+    /// Long-lived `/events` connection. Reconcile once on connect, then on every
+    /// event; reconnect with backoff if the stream drops.
+    private func eventsLoop() {
         while true {
+            reconcile(desired: publishedPorts())   // catch already-running containers
+            streamEvents { [weak self] in self?.scheduleReconcile() }
+            Thread.sleep(forTimeInterval: 1)        // reconnect backoff
+        }
+    }
+
+    /// Fallback so a missed event can't strand a forward for long.
+    private func safetyLoop() {
+        while true {
+            Thread.sleep(forTimeInterval: 30)
             reconcile(desired: publishedPorts())
-            Thread.sleep(forTimeInterval: 2)
+        }
+    }
+
+    /// Coalesce bursts of events (create+start+…) into a single reconcile.
+    private let reconcileQueue = DispatchQueue(label: "dev.openorb.portforward.reconcile")
+    private var pendingReconcile: DispatchWorkItem?
+    private func scheduleReconcile() {
+        reconcileQueue.async { [weak self] in
+            guard let self else { return }
+            self.pendingReconcile?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.reconcile(desired: self.publishedPorts())
+            }
+            self.pendingReconcile = work
+            self.reconcileQueue.asyncAfter(deadline: .now() + 0.15, execute: work)
         }
     }
 
@@ -153,22 +184,54 @@ final class PortForwarder {
         return ports
     }
 
-    /// Minimal HTTP/1.0 GET over the projected Docker Unix socket.
-    private func httpGet(_ path: String) -> Data? {
+    /// Connect to the projected Docker Unix socket; returns an fd or nil.
+    private func connectDockerSocket() -> Int32? {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
-        defer { close(fd) }
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let bytes = Array(dockerSocketPath.utf8)
-        guard bytes.count < MemoryLayout.size(ofValue: addr.sun_path) else { return nil }
+        guard bytes.count < MemoryLayout.size(ofValue: addr.sun_path) else { close(fd); return nil }
         withUnsafeMutableBytes(of: &addr.sun_path) { $0.copyBytes(from: bytes) }
         let ok = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
-        guard ok == 0 else { return nil }
+        guard ok == 0 else { close(fd); return nil }
+        return fd
+    }
+
+    /// Open the `/events` stream and call `onEvent` for each event line until the
+    /// connection drops. Blocks the calling thread.
+    private func streamEvents(onEvent: @escaping () -> Void) {
+        guard let fd = connectDockerSocket() else { return }
+        defer { close(fd) }
+        // HTTP/1.1 streaming, no read timeout — events arrive whenever they happen.
+        let req = "GET /events HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        _ = req.withCString { write(fd, $0, strlen($0)) }
+        let n = 16 * 1024
+        let buf = UnsafeMutableRawPointer.allocate(byteCount: n, alignment: 1)
+        defer { buf.deallocate() }
+        var sawHeaderEnd = false
+        var acc = Data()
+        while true {
+            let r = read(fd, buf, n)
+            if r <= 0 { break }
+            if sawHeaderEnd {
+                onEvent()
+                continue
+            }
+            // Skip the HTTP response headers; everything after is event data.
+            acc.append(Data(bytes: buf, count: r))
+            if acc.range(of: Data("\r\n\r\n".utf8)) != nil { sawHeaderEnd = true; acc = Data() }
+        }
+    }
+
+    /// Minimal HTTP/1.0 GET over the projected Docker Unix socket.
+    private func httpGet(_ path: String) -> Data? {
+        guard let fd = connectDockerSocket() else { return nil }
+        defer { close(fd) }
         // dockerd may keep the connection open even for HTTP/1.0, so a plain
         // read-until-EOF would block forever. Cap reads with a recv timeout.
         var tv = timeval(tv_sec: 3, tv_usec: 0)
