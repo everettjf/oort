@@ -52,8 +52,8 @@ write_files:
       echo "openorb: docker ${V} installed"
 
   # dockerd unit (static binaries bring their own containerd/runc on PATH).
-  # --iptables=false avoids needing the iptables package; container outbound
-  # NAT is wired up properly in a later stage.
+  # The base cloud image ships iptables (nft backend), so let dockerd manage
+  # its NAT/MASQUERADE rules — that's what gives containers outbound network.
   - path: /etc/systemd/system/docker.service
     permissions: "0644"
     content: |
@@ -62,7 +62,7 @@ write_files:
       After=network-online.target
       Wants=network-online.target
       [Service]
-      ExecStart=/usr/local/bin/dockerd --iptables=false
+      ExecStart=/usr/local/bin/dockerd
       Restart=always
       RestartSec=2
       Delegate=yes

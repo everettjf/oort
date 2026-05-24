@@ -110,9 +110,9 @@ The VirtIO balloon device is attached, but active ballooning (grow/reclaim on de
 wired yet. Use `--memory` to cap it.
 
 ### Can containers reach the internet?
-dockerd currently starts with `--iptables=false` (to avoid an iptables package dependency), so
-container-to-internet NAT isn't fully wired — local runs/builds and image pulls (dockerd uses
-the host network) all work. Full container egress is future work.
+Yes. dockerd manages its own iptables NAT/MASQUERADE rules (the base cloud image ships
+iptables with the nft backend), so containers have outbound network — `docker build` steps
+like `RUN apk add` / `npm install`, and runtime egress, all work.
 
 ## Cleanup / reset
 
