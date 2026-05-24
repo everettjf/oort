@@ -47,10 +47,12 @@ $ orb exec 'uname -a'             # run a command inside the guest
 | Capability | What it does | Status |
 |---|---|:---:|
 | 🐳 **Docker over vsock** | VZ boots a Linux VM; dockerd is projected onto a macOS Unix socket via virtio-vsock | ✅ |
-| 📁 **VirtioFS sharing** | Host dir mounted at the guest's `/mnt/mac`, read/write both ways | ✅ |
+| 🌐 **Container networking** | dockerd manages iptables NAT — `docker build` (`RUN apk/npm/pip…`) and runtime egress work | ✅ |
+| 📁 **File sharing** | Your Mac home is mirrored into the guest at the same path, so `docker -v $PWD:/app` just works | ✅ |
 | 🧬 **Rosetta x86** | `linux/amd64` images run via Rosetta — far faster than QEMU | ✅ |
-| 🔌 **Port forwarding** | Container-published ports appear automatically on macOS `localhost` | ✅ |
-| 🛰️ **`orb` CLI** | One command for lifecycle, `orb exec`, docker passthrough | ✅ |
+| 🔌 **Port forwarding** | Container-published ports appear automatically on macOS `localhost` (event-driven) | ✅ |
+| 🧭 **Follows Mac DNS** | Guest/containers use the Mac's DNS resolvers — internal/VPN domains resolve | ✅ |
+| 🛰️ **`orb` CLI** | Lifecycle, `orb exec`, docker passthrough, `orb autostart` at login | ✅ |
 | 💾 **zram swap** | Wired up (needs a kernel with the zram module — see docs) | ⚠️ |
 
 > All verified on **macOS 26.3 / Apple Silicon**, against the project's own daemon.
@@ -149,6 +151,10 @@ openorb/
 
 ## ⚠️ Known limitations
 
+- **Bind-mount small-file speed**: VirtioFS is ~21× slower than local disk for many small files
+  (e.g. `npm install` on a mounted source). VZ exposes no cache tuning, so the real fix is a
+  custom VirtioFS/DAX layer (Stage 5). Workaround: keep hot dirs in a named volume.
+- **VPN**: DNS *resolution* follows the Mac, but VPN *traffic* routing needs a user-space netstack (future).
 - **zram**: the stock Ubuntu cloud kernel ships without the `zram` module, so that service
   no-ops. OrbStack builds a custom kernel with it baked in — that's a Stage 5 item.
 - **Dynamic memory**: the VirtIO balloon device is attached, but active ballooning isn't wired yet.

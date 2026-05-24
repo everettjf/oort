@@ -46,10 +46,12 @@ $ orb exec 'uname -a'             # 直接在客户机里执行命令
 | 能力 | 说明 | 状态 |
 |---|---|:---:|
 | 🐳 **Docker over vsock** | VZ 启动 Linux VM，dockerd 经 virtio-vsock 投影到 macOS unix socket | ✅ |
-| 📁 **VirtioFS 文件共享** | 主机目录挂到客户机 `/mnt/mac`，双向读写 | ✅ |
+| 🌐 **容器联网** | dockerd 管理 iptables NAT —— `docker build`（`RUN apk/npm/pip…`）和运行时出网都正常 | ✅ |
+| 📁 **文件共享** | Mac 家目录以相同路径镜像进客户机，`docker -v $PWD:/app` 直接可用 | ✅ |
 | 🧬 **Rosetta x86 翻译** | `linux/amd64` 镜像经 Rosetta 运行，远快于 QEMU | ✅ |
-| 🔌 **端口自动转发** | 容器发布端口自动出现在 macOS `localhost` | ✅ |
-| 🛰️ **`orb` CLI** | 一条命令管理生命周期、`orb exec`、docker 透传 | ✅ |
+| 🔌 **端口自动转发** | 容器发布端口自动出现在 macOS `localhost`（事件驱动） | ✅ |
+| 🧭 **跟随 Mac DNS** | 客户机/容器用 Mac 的 DNS 解析器——内网/VPN 域名可解析 | ✅ |
+| 🛰️ **`orb` CLI** | 生命周期、`orb exec`、docker 透传、`orb autostart` 开机自启 | ✅ |
 | 💾 **zram 压缩交换** | 已接入（需内核含 zram 模块，详见文档） | ⚠️ |
 
 > 全部在 **macOS 26.3 / Apple Silicon** 上对接本项目自己的守护进程验证通过。
@@ -148,6 +150,8 @@ openorb/
 
 ## ⚠️ 已知限制
 
+- **bind mount 小文件速度**：VirtioFS 对大量小文件比本地盘慢约 21×（如挂源码跑 `npm install`）。VZ 不暴露缓存调优，真正的修复需自研 VirtioFS/DAX 层（阶段五）。变通：热点目录用命名卷。
+- **VPN**：DNS *解析*已跟随 Mac，但 VPN *流量*路由需自研用户态网络栈（后续）。
 - **zram**：stock Ubuntu 云内核不含 `zram` 模块，该服务会优雅跳过。OrbStack 自编译内核内置了它 —— 这是阶段五的事。
 - **动态内存**：已挂载 VirtIO 气球设备，但「按需增长/回收」的主动 ballooning 尚未接入。
 - **单 VM**：单一共享内核 VM（类 WSL2 / OrbStack），多「机器」是后续功能。
