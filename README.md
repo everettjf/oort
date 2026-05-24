@@ -117,6 +117,7 @@ The guest is a stock Ubuntu 24.04 cloud image, provisioned **without apt** on fi
 | [Architecture](./docs/architecture.md) · [中文](./docs/architecture.zh-CN.md) | How VZ / vsock / VirtioFS / Rosetta / port-forward / the Go agent work |
 | [CLI reference](./docs/cli-reference.md) · [中文](./docs/cli-reference.zh-CN.md) | Every `orb` subcommand + all `openorb run` flags |
 | [FAQ](./docs/faq.md) · [中文](./docs/faq.zh-CN.md) | Troubleshooting (DNS, zram, provisioning, coexisting with Docker Desktop) |
+| [Roadmap](./docs/roadmap.md) · [中文](./docs/roadmap.zh-CN.md) | What's done and what's next |
 | [Research report](./orbstack-research.md) | OrbStack internals + clone roadmap (the project's origin) |
 
 ---
