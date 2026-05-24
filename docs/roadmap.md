@@ -5,6 +5,8 @@
 Where openorb is and where it's going. This is a learning/research clone of OrbStack — the
 goal is to reproduce the core experience and close the gap to OrbStack step by step.
 
+> See the **[step-by-step plan](./plan.md)** for how we close each gap below.
+
 ## ✅ Done
 
 **Stages 1–4** (the working core):

@@ -117,6 +117,7 @@ orb stop
 | [命令参考](./docs/cli-reference.zh-CN.md) | `orb` 全部子命令 + `openorb run` 全部参数 |
 | [常见问题](./docs/faq.zh-CN.md) | FAQ 与排错（DNS、zram、provisioning、与 Docker Desktop 共存等） |
 | [路线图](./docs/roadmap.zh-CN.md) | 已完成 + 接下来要做的 |
+| [计划](./docs/plan.zh-CN.md) | 一步步追平 OrbStack 的可执行计划 |
 | [深度调研报告](./orbstack-research.md) | OrbStack 实现原理 + 复刻路线（项目缘起） |
 
 ---
