@@ -95,6 +95,14 @@ write host files through `-v /mnt/mac:/...`.
 > Note: this is a "basic" VirtioFS — without OrbStack's custom caching/batching layer (that's
 > Stage 5, and OrbStack's performance moat).
 
+**Measured (see `bench.sh`):** sequential throughput is fine (~68% of the guest's own disk on
+write, faster on cached reads), but **small-file/metadata ops are ~21× slower** (3000 files:
+~720 ms vs ~34 ms locally) — each create is a FUSE round-trip. This is exactly the `npm install`
+/ `git status` pain. We confirmed the cache mode is **not tunable from the guest** on VZ
+(`mount -o cache=always` is rejected — VZ controls the host side and doesn't expose it), so the
+only real fix is a custom VirtioFS layer / DAX (Stage 5). **Workaround today:** keep hot dirs
+(e.g. `node_modules`, build output) in a Docker named volume rather than a bind mount.
+
 ## 5. x86-64 translation: Rosetta
 
 With `--rosetta`:
