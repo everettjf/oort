@@ -12,7 +12,8 @@
 #   orb docker <args...>      run docker against the openorb daemon
 #   orb env                   print `export DOCKER_HOST=...` for your shell
 #   orb logs                  tail the guest console log
-#   orb build-image           (re)build the boot disk + cloud-init seed
+#   orb build-image           build + provision the disk, snapshot a golden image
+#   orb reset                 restore the disk from the golden snapshot
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -23,6 +24,7 @@ CONSOLE_LOG="$STATE/console.log"
 PIDFILE="$STATE/vm.pid"
 DISK="${OPENORB_DISK:-$HERE/images/disk.img}"
 SEED="${OPENORB_SEED:-$HERE/images/seed.img}"
+GOLDEN="${OPENORB_GOLDEN:-$HERE/images/disk-golden.img}"
 SHARE="${OPENORB_SHARE:-$HERE/share}"
 mkdir -p "$STATE"
 
@@ -64,6 +66,7 @@ mount_home() {
 }
 
 cmd_start() {
+  [ "${1:-}" = "--home" ] && { MOUNT_HOME=1; shift; }
   if vm_running; then echo "openorb already running (pid $(cat "$PIDFILE"))"; return 0; fi
   rm -f "$PIDFILE"   # clear any stale pidfile from a crashed/old run
   [ -f "$DISK" ] || { echo "no disk image at $DISK — run 'orb build-image' first"; exit 1; }
@@ -74,23 +77,29 @@ cmd_start() {
   local b; b="$(bin)"
   rm -f "$DOCKER_SOCK" "$AGENT_SOCK"
   echo "starting openorb VM…"
-  # Share the Mac home at its real path inside the guest, so `docker -v $PWD:/x`
-  # works for any project under $HOME (OrbStack-style path mirroring), plus the
-  # repo's share dir at /mnt/mac (carries the provisioning artifacts).
+  # Mounts: always the repo share at /mnt/mac (carries provisioning artifacts).
+  # Optionally mirror the Mac home at its real path so `docker -v $PWD:/x` works
+  # for any project under $HOME. Off by default: $HOME contains the VM's own disk
+  # images, so sharing all of it is heavy and stalls first-boot provisioning.
+  # Opt in with `MOUNT_HOME=1 orb start` (or `orb start --home`).
+  local mounts=(--mount "$SHARE:mac")
+  [ "${MOUNT_HOME:-0}" = 1 ] && mounts+=(--mount "$HOME:home")
   nohup "$b" run \
     --disk "$DISK" --seed "$SEED" \
-    --mount "$SHARE:mac" --mount "$HOME:home" --rosetta \
+    "${mounts[@]}" --rosetta \
     --forward "$AGENT_SOCK:2376" \
     --no-console --console-log "$CONSOLE_LOG" \
     --socket "$DOCKER_SOCK" > "$STATE/vm.log" 2>&1 &
   echo $! > "$PIDFILE"
   printf "waiting for Docker"
-  for _ in $(seq 1 60); do
+  # Up to ~5 min: first-boot provisioning (downloading Docker) is the slow case;
+  # a reused/golden disk is ready in seconds.
+  for _ in $(seq 1 150); do
     # Wait for /version, not just /_ping: _ping goes green a moment before the
     # daemon can actually create containers, which races the first `docker run`.
     if curl -s --max-time 4 --unix-socket "$DOCKER_SOCK" http://localhost/version 2>/dev/null | grep -q '"ApiVersion"'; then
       echo " ready."
-      mount_home
+      [ "${MOUNT_HOME:-0}" = 1 ] && mount_home
       sync_dns
       echo; cmd_env; return 0
     fi
@@ -144,7 +153,28 @@ cmd_docker() { DOCKER_HOST="unix://$DOCKER_SOCK" docker "$@"; }
 
 cmd_logs() { tail -f "$CONSOLE_LOG"; }
 
-cmd_build_image() { (cd "$HERE" && ./make-image.sh); }
+# Build a fully-provisioned "golden" disk: create raw disk + seed + agent, then
+# boot once so cloud-init finishes (installs Docker etc.), stop cleanly, and
+# snapshot the ready disk. After this, every `orb start` is the fast reuse path
+# (no provisioning) — and `orb reset` can restore the golden image instantly.
+cmd_build_image() {
+  (cd "$HERE" && ./make-image.sh)
+  echo "==> provisioning the image (one-time first boot)…"
+  MOUNT_HOME=0 cmd_start >/dev/null   # $HOME share would stall the provisioning boot
+  cmd_stop  >/dev/null
+  echo "==> snapshotting golden image"
+  cp -c "$DISK" "$GOLDEN" 2>/dev/null || cp "$DISK" "$GOLDEN"
+  echo "done. 'orb start' is now instant; 'orb reset' restores this snapshot."
+}
+
+# Restore the provisioned disk from the golden snapshot (discard all changes).
+cmd_reset() {
+  vm_running && { echo "stop the VM first ('orb stop')"; exit 1; }
+  [ -f "$GOLDEN" ] || { echo "no golden image — run 'orb build-image' first"; exit 1; }
+  cp -c "$GOLDEN" "$DISK" 2>/dev/null || cp "$GOLDEN" "$DISK"
+  rm -f "$DISK.nvram"
+  echo "reset to the golden image."
+}
 
 # Start openorb automatically at login via a per-user LaunchAgent.
 AUTOSTART_PLIST="$HOME/Library/LaunchAgents/dev.openorb.plist"
@@ -190,6 +220,7 @@ case "${1:-help}" in
   autostart)    shift; cmd_autostart "$@";;
   logs)         shift; cmd_logs "$@";;
   build-image)  shift; cmd_build_image "$@";;
-  help|-h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//';;
+  reset)        shift; cmd_reset "$@";;
+  help|-h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//';;
   *) echo "unknown command: $1"; echo "run 'orb help'"; exit 1;;
 esac
