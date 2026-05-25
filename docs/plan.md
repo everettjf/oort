@@ -9,6 +9,24 @@ filesystem moat last.
 
 > Baseline numbers come from `bench.sh`. Re-run it after each milestone to track progress.
 
+## Status (M1–M8)
+
+| | Milestone | Status |
+|---|---|---|
+| M1 | Golden image / instant restart | ✅ verified |
+| M2 | zram (kernel-tier efficiency) | ✅ verified |
+| M3 | Active memory ballooning | ✅ verified |
+| M4 | Dev filesystem guidance | ✅ done (docs) |
+| M5 | Networking | 🟡 partial — DNS-following verified; `orb route` + full netstack pending |
+| M6 | Kubernetes (k3s) | 🟢 code-complete — live re-verify pending* |
+| M7 | Multiple machines | 🟢 code-complete — live re-verify pending* |
+| M8 | Native menu-bar GUI | ✅ builds & launches (UI not visually verified headless) |
+| M9 | Native-speed filesystem | ⛔ not started (the hard moat) |
+
+\* M6/M7 are implemented and reuse verified paths, but a clean end-to-end run
+couldn't be completed in the build session — the local VZ environment kept
+failing to boot a VM reliably. Re-verify on a fresh machine state.
+
 ## Parity scorecard
 
 | Dimension | OrbStack | openorb now | Target milestone |
