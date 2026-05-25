@@ -27,6 +27,65 @@ filesystem moat last.
 couldn't be completed in the build session — the local VZ environment kept
 failing to boot a VM reliably. Re-verify on a fresh machine state.
 
+## Reassessment — the real gap to OrbStack
+
+Building M1–M8 changed the picture. The biggest gap is **no longer a single missing
+feature** — it's that the **foundation isn't rock-solid yet**, and a chunk of work is
+**written but not proven**:
+
+- **Reliability:** the build effort repeatedly hit VM boot / first-boot-provision timeouts,
+  force-kills that corrupted the disk, and stuck build processes holding SwiftPM/Go locks that
+  cascaded into hangs. OrbStack just-works; openorb still sometimes won't boot. This is the
+  most painful practical gap.
+- **Unverified work:** `orb route` (M5), k3s (M6), machines (M7) are code-complete but never
+  ran end-to-end — and M7 shipped with a real bug that only surfaced when a stale verification
+  task finally completed. *Code that hasn't run doesn't count.*
+- **Maturity:** the GUI (M8) is a menu-bar stub; there's no packaging/distribution; the
+  filesystem moat (M9) is untouched.
+
+The gaps fall into three buckets:
+
+**A. Foundation (stability & trust) — the current top blocker**
+1. Boot/provision reliability: `orb start` must *always* come up, shutdown must never corrupt
+   the disk, no lock cascades.
+2. Prove the written work: real end-to-end green for M5 route, M6 k3s, M7 machines (+ fix bugs).
+3. An automated e2e test suite (start→docker→mount→rosetta→port→k8s→machine→stop), CI-gated, so
+   "unverified commits" can't happen again.
+
+**B. Performance (truly *fast*)**
+4. Custom minimal kernel + direct boot → cold start ~8 s down to ~1–2 s (OrbStack-level).
+5. **M9 filesystem moat** — own virtiofs caching/DAX (likely a custom VMM on
+   `Hypervisor.framework`). Small-file from ~21× toward native. The only research-hard piece.
+
+**C. Product (truly *nice*)**
+6. Full GUI (containers/images/volumes/logs/machines/k8s/settings), not a menu-bar stub.
+7. Networking depth: VPN *traffic* routing (gvproxy), container-by-IP, `*.orb.local` domains.
+8. Packaging: signed + notarized `.app`, dmg / brew cask, Sparkle auto-update.
+
+## Path forward — Phase 0 → 1 → 2
+
+> Reordered from the original M-sequence: **harden the foundation first**, then performance,
+> then product. Continuing to pile on features before Phase 0 just builds on sand.
+
+**Phase 0 — Foundation hardening (do first)**
+- 0.1 Root-cause and fix boot/provision reliability (EFI delay? cloud-init apt stalls? lock
+  contention?); target a stable <10 s start; graceful-only shutdown; `orb start` self-heals.
+- 0.2 `make verify` end-to-end suite + CI; red on any failure.
+- 0.3 Verify & harden M5 route / M6 k3s / M7 machines to real green.
+
+**Phase 1 — Performance**
+- 1.1 Custom compiled minimal kernel + direct boot → ~1–2 s start.
+- 1.2 (the moat) M9 self-built virtiofs caching/DAX → near-native files. Hardest, most expensive, last.
+
+**Phase 2 — Product**
+- 2.1 Full SwiftUI app (multi-panel).
+- 2.2 gvproxy netstack (VPN traffic + container IPs + domains).
+- 2.3 Signed/notarized `.app` + brew cask + auto-update.
+
+**Bottom line:** matching OrbStack's *speed* ≈ Phase 1.2 (research-hard, months, likely a custom
+VMM). Matching its *reliability and polish* ≈ Phase 0 + Phase 2 (large but ordinary engineering).
+**Do Phase 0 next** — not M9.
+
 ## Parity scorecard
 
 | Dimension | OrbStack | openorb now | Target milestone |
@@ -115,12 +174,10 @@ failing to boot a VM reliably. Re-verify on a fresh machine state.
 
 ---
 
-## Sequencing
+## Milestone vs phase
 
-1. **M1 → M2 → M3** — speed & efficiency basics (startup, boot, memory). Biggest perceived-speed win for least effort.
-2. **M4** — make dev-on-mounts usable in the meantime.
-3. **M5 → M6 → M7 → M8** — close the experience gap (networking, k8s, machines, GUI).
-4. **M9** — the filesystem moat, last (the only research-hard item).
-
-After M1–M8, openorb *looks and feels* like OrbStack. M9 is what makes it *truly as fast* on the
-filesystem. See the [research report](../orbstack-research.md) for the deep dive.
+The M1–M9 detail above is the original feature breakdown (M1–M8 now built; see Status). The
+**Phase 0 → 1 → 2** plan is what we actually execute next, after the reassessment: Phase 0 turns
+the built-but-shaky foundation into something trustworthy, then Phase 1 (incl. M9) chases real
+speed, then Phase 2 the product surface. See the [research report](../orbstack-research.md) for
+the OrbStack deep dive.
