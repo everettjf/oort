@@ -96,7 +96,7 @@ cmd_start() {
   [ -f "$K8S_MARKER" ] && extra+=(--tcp-forward 6443)   # project the k3s API
   nohup "$b" run \
     --disk "$DISK" --seed "$SEED" \
-    "${mounts[@]}" --rosetta "${extra[@]}" \
+    "${mounts[@]}" --rosetta ${extra[@]+"${extra[@]}"} \
     --forward "$AGENT_SOCK:2376" \
     --no-console --console-log "$CONSOLE_LOG" \
     --socket "$DOCKER_SOCK" > "$STATE/vm.log" 2>&1 &
