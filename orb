@@ -213,7 +213,7 @@ cmd_machine() {
   case "$sub" in
     create)
       local name="${1:?usage: orb machine create <name> [distro]}" distro="${2:-ubuntu}"
-      cmd_docker image inspect "$distro" >/dev/null 2>&1 || { echo "pulling $distro…"; cmd_docker pull "$distro" >/dev/null; }
+      cmd_docker image inspect "$distro" >/dev/null 2>&1 || { echo "pulling ${distro}…"; cmd_docker pull "$distro" >/dev/null; }
       cmd_docker run -d --name "$MACHINE_PREFIX$name" --hostname "$name" --restart unless-stopped \
         "$distro" sh -c 'while :; do sleep 3600; done' >/dev/null \
         && echo "machine '$name' ($distro) created — 'orb machine shell $name'"
