@@ -47,7 +47,7 @@ echo "── Small files: create $SMALL_N files (VirtioFS per-call cost) ──"
 sf() { gx "d=$1; rm -rf \$d; mkdir -p \$d; t=\$(date +%s%N); i=0; while [ \$i -lt $SMALL_N ]; do echo x > \$d/\$i; i=\$((i+1)); done; echo \$(( (\$(date +%s%N) - t) / 1000000 ))ms"; }
 vfs_sf=$(sf "/mnt/mac/.bench/sf" | tail -1)
 loc_sf=$(sf "/var/tmp/.bench/sf" | tail -1)
-printf "  VirtioFS : %s\n" "${vfs_sf:-n/a}"
+printf "  VirtioFS : %s   (FUSE per-call overhead)\n" "${vfs_sf:-n/a}"
 printf "  guest fs : %s   (baseline)\n" "${loc_sf:-n/a}"
 
 echo

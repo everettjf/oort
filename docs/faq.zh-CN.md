@@ -89,11 +89,17 @@ orb docker ps       # 确认端口确实 publish 了（0.0.0.0:8080->80/tcp）
 
 ## 功能与限制
 
-### zram 没生效
-stock Ubuntu 云内核**不含 `zram` 模块**（在 `linux-modules-extra` 里），所以 zram 服务会优雅跳过。这正是 OrbStack 自编译内核的价值之一。要启用：换一个含该模块的内核，或安装 `linux-modules-extra-$(uname -r)`（需 apt）。
+### zram / 动态内存
+两者默认开启。provisioning 会安装 `zram` 内核模块（base 云内核没有），开机即起压缩内存交换；host 侧的气球循环把空闲客户机内存还给 macOS（目标跟随用量，封顶 `--memory`）。气球可用 `--no-dynamic-memory` 关闭。
 
-### 内存占用 / 动态内存
-已挂载 VirtIO 气球设备，但主动 ballooning（按需增长/回收）尚未接入。用 `--memory` 设定上限。
+### 挂源码目录开发很慢
+VirtioFS bind mount 有每调用（FUSE）开销——`bench.sh` 显示小文件/元数据操作比客户机本地盘慢不少（这正是自研 VirtioFS/DAX 层要补的差距,见[路线图](./roadmap.zh-CN.md)）。标准缓解方式（和其它 Docker-on-Mac 一样）:把**元数据密集的热点目录放进 Docker 命名卷**,而非 bind mount——比如源码读写挂载,但 `node_modules`/构建产物放卷:
+
+```bash
+docker run -v "$PWD:$PWD" -w "$PWD" -v myproj_node_modules:"$PWD/node_modules" node:20 npm install
+```
+
+收益与负载相关(对 `npm`/`yarn` 这类元数据频繁的工具有效）；纯顺序读写在 VirtioFS 上已接近原生。
 
 ### 容器能上网吗
 能。dockerd 自己管理 iptables 的 NAT/MASQUERADE 规则（base 云镜像自带 nft 后端的 iptables），所以容器有出网——`docker build` 里的 `RUN apk add` / `npm install`,以及运行时访问外网都正常。

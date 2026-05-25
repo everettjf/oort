@@ -100,14 +100,25 @@ If you used `--no-port-forward`, no forwarding happens.
 
 ## Features & limits
 
-### zram isn't active
-The stock Ubuntu cloud kernel **lacks the `zram` module** (it lives in `linux-modules-extra`),
-so the zram service no-ops. This is exactly the value of OrbStack's custom kernel. To enable it:
-use a kernel that has the module, or install `linux-modules-extra-$(uname -r)` (needs apt).
+### zram / dynamic memory
+Both are on by default. Provisioning installs the `zram` kernel module (it's not in the base
+cloud kernel) so a compressed RAM swap comes up on boot, and a host-side balloon loop returns
+idle guest memory to macOS (target tracks usage, capped at `--memory`). Disable the balloon with
+`--no-dynamic-memory`.
 
-### Memory usage / dynamic memory
-The VirtIO balloon device is attached, but active ballooning (grow/reclaim on demand) isn't
-wired yet. Use `--memory` to cap it.
+### Developing on a mounted source dir is slow
+VirtioFS bind mounts have a per-call (FUSE) overhead — `bench.sh` shows small-file/metadata ops
+much slower than the guest's own disk (this is the gap a custom VirtioFS/DAX layer would close;
+see the [roadmap](./roadmap.md)). The standard mitigation, same as other Docker-on-Mac setups:
+keep **metadata-heavy hot directories in a Docker named volume** rather than on the bind mount —
+e.g. mount your source read-write but put `node_modules` / build output in a volume:
+
+```bash
+docker run -v "$PWD:$PWD" -w "$PWD" -v myproj_node_modules:"$PWD/node_modules" node:20 npm install
+```
+
+The benefit is workload-dependent (it helps metadata-churny tools like `npm`/`yarn`); plain
+sequential read/write over VirtioFS is already close to native.
 
 ### Can containers reach the internet?
 Yes. dockerd manages its own iptables NAT/MASQUERADE rules (the base cloud image ships
