@@ -65,8 +65,9 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
             }
         }
 
-        if cfg.portForward {
-            let pf = PortForwarder(dockerSocketPath: cfg.hostSocketPath, vmQueue: vmQueue, socketDevice: device)
+        if cfg.portForward || !cfg.tcpForwards.isEmpty {
+            let pf = PortForwarder(dockerSocketPath: cfg.hostSocketPath, vmQueue: vmQueue,
+                                   socketDevice: device, staticPorts: cfg.tcpForwards)
             pf.start()
             portForwarder = pf
         }

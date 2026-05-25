@@ -32,6 +32,8 @@ struct Config {
     var forwards: [Forward]
     /// Auto-forward container-published ports to the macOS localhost (Stage 3).
     var portForward: Bool
+    /// Always-on localhost→guest TCP forwards (e.g. the k3s API on 6443) (M6).
+    var tcpForwards: [Int]
     /// Active memory ballooning: return idle guest memory to macOS (M3).
     var dynamicMemory: Bool
     /// vsock port inside the guest where dockerd is exposed (see guest/ setup).
@@ -110,6 +112,7 @@ struct Config {
         var forwards: [Forward] = []
         var portForward = true
         var dynamicMemory = true
+        var tcpForwards: [Int] = []
         var consoleLog: URL?
         var nvram: URL?
         var kernel: URL?
@@ -135,6 +138,7 @@ struct Config {
             case "--forward":    forwards.append(try parseForward(need(arg)))
             case "--no-port-forward": portForward = false
             case "--no-dynamic-memory": dynamicMemory = false
+            case "--tcp-forward": if let p = Int(try need(arg)) { tcpForwards.append(p) }
             case "--console-log": consoleLog = URL(fileURLWithPath: try need(arg))
             case "--nvram":      nvram = URL(fileURLWithPath: try need(arg))
             case "--kernel":     kernel = URL(fileURLWithPath: try need(arg))
@@ -168,6 +172,7 @@ struct Config {
             rosetta: rosetta,
             forwards: forwards,
             portForward: portForward,
+            tcpForwards: tcpForwards,
             dynamicMemory: dynamicMemory,
             guestVsockPort: vsockPort,
             hostSocketPath: socketPath,

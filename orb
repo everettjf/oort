@@ -15,6 +15,7 @@
 #   orb build-image           build + provision the disk, snapshot a golden image
 #   orb reset                 restore the disk from the golden snapshot
 #   orb route enable|disable  reach containers by their docker0 IP (sudo)
+#   orb k8s enable|disable    run Kubernetes (k3s) in the guest
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -85,9 +86,11 @@ cmd_start() {
   # Opt in with `MOUNT_HOME=1 orb start` (or `orb start --home`).
   local mounts=(--mount "$SHARE:mac")
   [ "${MOUNT_HOME:-0}" = 1 ] && mounts+=(--mount "$HOME:home")
+  local extra=()
+  [ -f "$K8S_MARKER" ] && extra+=(--tcp-forward 6443)   # project the k3s API
   nohup "$b" run \
     --disk "$DISK" --seed "$SEED" \
-    "${mounts[@]}" --rosetta \
+    "${mounts[@]}" --rosetta "${extra[@]}" \
     --forward "$AGENT_SOCK:2376" \
     --no-console --console-log "$CONSOLE_LOG" \
     --socket "$DOCKER_SOCK" > "$STATE/vm.log" 2>&1 &
@@ -186,6 +189,43 @@ cmd_reset() {
   echo "reset to the golden image."
 }
 
+# Kubernetes via k3s in the guest (M6). Installs k3s, projects its API server
+# (guest 127.0.0.1:6443) onto the Mac's localhost:6443 (static tcp-forward), and
+# writes a kubeconfig. `orb start` adds the 6443 forward whenever k8s is enabled.
+K8S_MARKER="$STATE/k8s-enabled"
+KUBECONFIG_OUT="$STATE/kube/config"
+cmd_k8s() {
+  case "${1:-status}" in
+    enable)
+      vm_running || { echo "start openorb first ('orb start')"; exit 1; }
+      echo "installing k3s in the guest (one-time, ~1 min)…"
+      gx() { curl -s --max-time 240 --unix-socket "$AGENT_SOCK" -X POST --data-binary "$1" http://localhost/ 2>/dev/null; }
+      gx 'command -v k3s >/dev/null 2>&1 || curl -sfL https://get.k3s.io | sh -s - --write-kubeconfig-mode 644 >/dev/null 2>&1; echo done' >/dev/null
+      printf "waiting for the kube API"
+      for _ in $(seq 1 60); do
+        gx 'test -f /etc/rancher/k3s/k3s.yaml && curl -sk https://127.0.0.1:6443/version >/dev/null 2>&1 && echo UP' | grep -q UP && break
+        printf "."; sleep 2
+      done; echo
+      mkdir -p "$(dirname "$KUBECONFIG_OUT")"
+      gx 'cat /etc/rancher/k3s/k3s.yaml' > "$KUBECONFIG_OUT"
+      grep -q 'server:' "$KUBECONFIG_OUT" || { echo "failed to fetch kubeconfig"; exit 1; }
+      touch "$K8S_MARKER"
+      echo "restarting to project the kube API on localhost:6443…"
+      cmd_stop >/dev/null; cmd_start >/dev/null
+      echo "Kubernetes ready. Use it with:"
+      echo "  export KUBECONFIG=$KUBECONFIG_OUT"
+      echo "  kubectl get nodes"
+      ;;
+    disable)
+      rm -f "$K8S_MARKER"
+      gx() { curl -s --max-time 60 --unix-socket "$AGENT_SOCK" -X POST --data-binary "$1" http://localhost/ 2>/dev/null; }
+      vm_running && gx '/usr/local/bin/k3s-uninstall.sh >/dev/null 2>&1; echo done' >/dev/null
+      echo "Kubernetes disabled."
+      ;;
+    *) [ -f "$K8S_MARKER" ] && echo "kubernetes: enabled (KUBECONFIG=$KUBECONFIG_OUT)" || echo "kubernetes: disabled (use 'orb k8s enable')";;
+  esac
+}
+
 # Reach containers by their docker0 IP from macOS (M5, opt-in). The host can
 # already reach the guest IP over VZ NAT; this adds a route so 172.17.0.0/16
 # (Docker's default bridge) goes via the guest, which forwards to the container.
@@ -254,6 +294,7 @@ case "${1:-help}" in
   build-image)  shift; cmd_build_image "$@";;
   reset)        shift; cmd_reset "$@";;
   route)        shift; cmd_route "$@";;
-  help|-h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//';;
+  k8s)          shift; cmd_k8s "$@";;
+  help|-h|--help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//';;
   *) echo "unknown command: $1"; echo "run 'orb help'"; exit 1;;
 esac

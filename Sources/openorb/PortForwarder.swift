@@ -14,13 +14,16 @@ final class PortForwarder {
     private weak var socketDevice: VZVirtioSocketDevice?
     private let guestForwardPort: UInt32
 
+    private let staticPorts: Set<Int>   // always forwarded (e.g. k3s API 6443)
     private let lock = NSLock()
     private var listeners: [Int: Int32] = [:]   // hostPort -> listening fd
 
-    init(dockerSocketPath: String, vmQueue: DispatchQueue, socketDevice: VZVirtioSocketDevice, guestForwardPort: UInt32 = 2377) {
+    init(dockerSocketPath: String, vmQueue: DispatchQueue, socketDevice: VZVirtioSocketDevice,
+         staticPorts: [Int] = [], guestForwardPort: UInt32 = 2377) {
         self.dockerSocketPath = dockerSocketPath
         self.vmQueue = vmQueue
         self.socketDevice = socketDevice
+        self.staticPorts = Set(staticPorts)
         self.guestForwardPort = guestForwardPort
     }
 
@@ -37,7 +40,7 @@ final class PortForwarder {
     /// event; reconnect with backoff if the stream drops.
     private func eventsLoop() {
         while true {
-            reconcile(desired: publishedPorts())   // catch already-running containers
+            reconcile(desired: publishedPorts().union(staticPorts))   // catch already-running containers
             streamEvents { [weak self] in self?.scheduleReconcile() }
             Thread.sleep(forTimeInterval: 1)        // reconnect backoff
         }
@@ -47,7 +50,7 @@ final class PortForwarder {
     private func safetyLoop() {
         while true {
             Thread.sleep(forTimeInterval: 30)
-            reconcile(desired: publishedPorts())
+            reconcile(desired: publishedPorts().union(staticPorts))
         }
     }
 
@@ -60,7 +63,7 @@ final class PortForwarder {
             self.pendingReconcile?.cancel()
             let work = DispatchWorkItem { [weak self] in
                 guard let self else { return }
-                self.reconcile(desired: self.publishedPorts())
+                self.reconcile(desired: self.publishedPorts().union(self.staticPorts))
             }
             self.pendingReconcile = work
             self.reconcileQueue.asyncAfter(deadline: .now() + 0.15, execute: work)
