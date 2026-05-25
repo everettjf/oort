@@ -170,12 +170,23 @@ cmd_build_image() {
   (cd "$HERE" && ./make-image.sh)
   echo "==> provisioning the image (one-time first boot)…"
   MOUNT_HOME=0 cmd_start >/dev/null   # $HOME share would stall the provisioning boot
-  # Wait for cloud-init to FULLY finish (docker comes up before later runcmd
-  # steps like the zram-module install) — its last step touches this marker.
+  # Wait for the provisioning CORE to finish (docker/agent/mounts/rosetta) —
+  # this marker is touched before the optional zram step, so it's fast & reliable.
   printf "    finishing provisioning"
+  local ready=0
   for _ in $(seq 1 90); do
     curl -s --max-time 5 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
-      'test -e /run/openorb-ready && echo READY' http://localhost/ 2>/dev/null | grep -q READY && break
+      'test -e /run/openorb-ready && echo READY' http://localhost/ 2>/dev/null | grep -q READY && { ready=1; break; }
+    printf "."; sleep 2
+  done
+  echo
+  [ "$ready" = 1 ] || echo "    warning: provisioning didn't signal ready in time (snapshotting anyway)"
+  # Best-effort, bounded: give the background zram step a moment to bake into the
+  # golden image. Never fatal — reliability doesn't depend on it.
+  printf "    finishing zram (best-effort)"
+  for _ in $(seq 1 45); do
+    curl -s --max-time 5 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
+      'test -e /run/openorb-zram-done && echo Z' http://localhost/ 2>/dev/null | grep -q Z && break
     printf "."; sleep 2
   done
   echo

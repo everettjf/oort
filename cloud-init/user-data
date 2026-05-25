@@ -102,15 +102,22 @@ write_files:
     permissions: "0755"
     content: |
       #!/bin/sh
-      modprobe zram num_devices=1 2>/dev/null || exit 0
-      [ -e /dev/zram0 ] || exit 0
-      swapon --show=NAME --noheadings 2>/dev/null | grep -q zram0 && exit 0
-      echo lz4 > /sys/block/zram0/comp_algorithm 2>/dev/null || true
-      MEM_KB=$(awk '/MemTotal/{print $2}' /proc/meminfo)
-      echo "$((MEM_KB / 2))K" > /sys/block/zram0/disksize
-      mkswap /dev/zram0 >/dev/null 2>&1
-      swapon -p 100 /dev/zram0
-      echo "openorb: zram swap on ($((MEM_KB / 2)) KB)"
+      # Best-effort, fully bounded: NEVER block boot/provisioning. The zram module
+      # isn't in the base cloud kernel, so install it if missing (time-capped), then
+      # set up the swap. Touches a marker so build-image can wait a bounded time.
+      if ! modprobe zram num_devices=1 2>/dev/null; then
+        timeout 120 sh -c 'DEBIAN_FRONTEND=noninteractive apt-get update -o Acquire::http::Timeout=15 >/dev/null 2>&1; \
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends linux-modules-extra-$(uname -r) >/dev/null 2>&1' || true
+        modprobe zram num_devices=1 2>/dev/null || { touch /run/openorb-zram-done; exit 0; }
+      fi
+      if [ -e /dev/zram0 ] && ! swapon --show=NAME --noheadings 2>/dev/null | grep -q zram0; then
+        echo lz4 > /sys/block/zram0/comp_algorithm 2>/dev/null || true
+        MEM_KB=$(awk '/MemTotal/{print $2}' /proc/meminfo)
+        echo "$((MEM_KB / 2))K" > /sys/block/zram0/disksize
+        mkswap /dev/zram0 >/dev/null 2>&1
+        swapon -p 100 /dev/zram0 && echo "openorb: zram swap on ($((MEM_KB / 2)) KB)"
+      fi
+      touch /run/openorb-zram-done
   - path: /etc/systemd/system/openorb-zram.service
     permissions: "0644"
     content: |
@@ -170,9 +177,9 @@ runcmd:
   - systemctl enable --now docker.service
   - systemctl enable --now openorb-guest.service
   - systemctl enable --now openorb-rosetta.service || true
-  # zram lives in linux-modules-extra (not in the base cloud kernel). Install it
-  # once here (egress works) so the golden image has it; ~20s, one-time.
-  - DEBIAN_FRONTEND=noninteractive apt-get update -o Acquire::http::Timeout=20 >/dev/null 2>&1 || true
-  - DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)" >/dev/null 2>&1 || true
-  - systemctl enable --now openorb-zram.service || true
+  # Core provisioning is done here — mark ready BEFORE the slow/optional zram step
+  # so `orb start` / build-image never wait on apt (the old reliability sink).
   - touch /run/openorb-ready
+  # zram (module install + swap) runs in the background, time-capped, never blocks.
+  - systemctl enable openorb-zram.service || true
+  - systemctl start --no-block openorb-zram.service || true
