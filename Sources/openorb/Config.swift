@@ -32,6 +32,8 @@ struct Config {
     var forwards: [Forward]
     /// Auto-forward container-published ports to the macOS localhost (Stage 3).
     var portForward: Bool
+    /// Active memory ballooning: return idle guest memory to macOS (M3).
+    var dynamicMemory: Bool
     /// vsock port inside the guest where dockerd is exposed (see guest/ setup).
     var guestVsockPort: UInt32
     /// Unix socket on macOS that the Docker CLI will talk to.
@@ -82,6 +84,7 @@ struct Config {
           --forward <sock>:<port>  Extra host-socket ⇄ guest-vsock-port forward
                                    (repeatable; e.g. a debug agent on port 2376).
           --no-port-forward        Don't auto-forward container ports to localhost.
+          --no-dynamic-memory      Don't actively balloon idle guest memory back.
 
         MISC:
           --no-console             Don't attach the guest serial console to stdio
@@ -106,6 +109,7 @@ struct Config {
         var rosetta = false
         var forwards: [Forward] = []
         var portForward = true
+        var dynamicMemory = true
         var consoleLog: URL?
         var nvram: URL?
         var kernel: URL?
@@ -130,6 +134,7 @@ struct Config {
             case "--rosetta":    rosetta = true
             case "--forward":    forwards.append(try parseForward(need(arg)))
             case "--no-port-forward": portForward = false
+            case "--no-dynamic-memory": dynamicMemory = false
             case "--console-log": consoleLog = URL(fileURLWithPath: try need(arg))
             case "--nvram":      nvram = URL(fileURLWithPath: try need(arg))
             case "--kernel":     kernel = URL(fileURLWithPath: try need(arg))
@@ -163,6 +168,7 @@ struct Config {
             rosetta: rosetta,
             forwards: forwards,
             portForward: portForward,
+            dynamicMemory: dynamicMemory,
             guestVsockPort: vsockPort,
             hostSocketPath: socketPath,
             serialConsole: console,

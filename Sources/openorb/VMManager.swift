@@ -10,11 +10,14 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
     private var vm: VZVirtualMachine!
     private var proxies: [DockerSocketProxy] = []
     private var portForwarder: PortForwarder?
+    private var memoryManager: MemoryManager?
+    private var configuredMemory: UInt64 = 0
 
     init(_ cfg: Config) { self.cfg = cfg }
 
     func startAndProject() throws {
         let configuration = try VMConfig.make(cfg)
+        configuredMemory = configuration.memorySize
         Log.info("config: cpus=\(configuration.cpuCount) memory=\(configuration.memorySize / (1024*1024))MiB")
 
         vmQueue.sync {
@@ -66,6 +69,14 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
             let pf = PortForwarder(dockerSocketPath: cfg.hostSocketPath, vmQueue: vmQueue, socketDevice: device)
             pf.start()
             portForwarder = pf
+        }
+
+        if cfg.dynamicMemory,
+           let balloon = vm.memoryBalloonDevices.first as? VZVirtioTraditionalMemoryBalloonDevice {
+            let mm = MemoryManager(device: balloon, vmQueue: vmQueue, socketDevice: device,
+                                   configuredBytes: configuredMemory)
+            mm.start()
+            memoryManager = mm
         }
         printReadyBanner()
     }
