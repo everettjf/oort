@@ -1,0 +1,50 @@
+name: ci
+
+# What CI *can* check on GitHub's hosted runners, and what it can't:
+#
+# GitHub's macOS runners are themselves virtualized, and Apple's
+# Virtualization.framework cannot nest — so the full end-to-end suite
+# (`make verify`, which boots a real Linux VM) only runs on a real
+# Apple-silicon Mac. CI therefore covers everything *up to* booting a VM:
+# the host engine builds and codesigns, the guest agent cross-compiles,
+# and the shell entrypoints lint clean. Run `make verify` locally for e2e.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-lint:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: swift --version && go version
+
+      - name: Build host engine (release)
+        run: swift build -c release
+
+      - name: Codesign with virtualization entitlement
+        run: |
+          BIN="$(swift build -c release --show-bin-path)/openorb"
+          codesign --force --sign - --entitlements openorb.entitlements "$BIN"
+          # Guard against the bin()-didn't-sign regression: the entitlement
+          # MUST be present, or VZ refuses to launch (VZErrorDomain Code=2).
+          codesign -d --entitlements - "$BIN" 2>/dev/null \
+            | grep -q com.apple.security.virtualization \
+            || { echo "::error::binary is missing the virtualization entitlement"; exit 1; }
+          echo "entitlement present ✅"
+
+      - name: Cross-compile guest agent (linux/arm64)
+        run: make guest
+
+      - name: go vet
+        run: cd guest-agent && go vet ./...
+
+      - name: shellcheck
+        run: |
+          brew install shellcheck >/dev/null
+          shellcheck -S warning orb tests/e2e.sh make-image.sh run.sh
