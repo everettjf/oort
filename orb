@@ -14,6 +14,7 @@
 #   orb logs                  tail the guest console log
 #   orb build-image           build + provision the disk, snapshot a golden image
 #   orb reset                 restore the disk from the golden snapshot
+#   orb route enable|disable  reach containers by their docker0 IP (sudo)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -185,6 +186,28 @@ cmd_reset() {
   echo "reset to the golden image."
 }
 
+# Reach containers by their docker0 IP from macOS (M5, opt-in). The host can
+# already reach the guest IP over VZ NAT; this adds a route so 172.17.0.0/16
+# (Docker's default bridge) goes via the guest, which forwards to the container.
+# NOTE: needs sudo for `route`; re-run after a restart (the guest IP can change).
+cmd_route() {
+  case "${1:-}" in
+    enable)
+      vm_running || { echo "start openorb first ('orb start')"; exit 1; }
+      local gip; gip="$(curl -s --max-time 8 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
+        'ip -4 -o addr show enp0s1 | grep -oE "192\.168\.[0-9]+\.[0-9]+" | head -1' http://localhost/ 2>/dev/null)"
+      [ -n "$gip" ] || { echo "couldn't read the guest IP (is the agent up?)"; exit 1; }
+      echo "routing 172.17.0.0/16 via the guest ($gip) — sudo required:"
+      sudo route -n add -net 172.17.0.0/16 "$gip" && \
+        echo "done — containers are now reachable by their docker0 IP from macOS."
+      ;;
+    disable)
+      sudo route -n delete -net 172.17.0.0/16 2>/dev/null && echo "route removed" || echo "no route to remove"
+      ;;
+    *) echo "usage: orb route enable|disable";;
+  esac
+}
+
 # Start openorb automatically at login via a per-user LaunchAgent.
 AUTOSTART_PLIST="$HOME/Library/LaunchAgents/dev.openorb.plist"
 cmd_autostart() {
@@ -230,6 +253,7 @@ case "${1:-help}" in
   logs)         shift; cmd_logs "$@";;
   build-image)  shift; cmd_build_image "$@";;
   reset)        shift; cmd_reset "$@";;
-  help|-h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//';;
+  route)        shift; cmd_route "$@";;
+  help|-h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//';;
   *) echo "unknown command: $1"; echo "run 'orb help'"; exit 1;;
 esac
