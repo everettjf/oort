@@ -32,13 +32,23 @@ fi
 echo "==> start"
 "$ORB" start >/dev/null 2>&1
 SOCK="$HOME/.openorb/docker.sock"
-curl -s --max-time 6 --unix-socket "$SOCK" http://localhost/_ping 2>/dev/null | grep -q OK \
-  || { echo "VM/Docker did not come up — aborting"; "$ORB" stop >/dev/null 2>&1; exit 1; }
+# Confirm Docker is actually reachable AND stable: probe /version (not just
+# _ping) a few times over ~30s, since the daemon can answer once and then still
+# be settling right after a reuse boot.
+up=n; for _ in $(seq 1 15); do
+  curl -s --max-time 4 --unix-socket "$SOCK" http://localhost/version 2>/dev/null | grep -q ApiVersion && { up=y; break; }
+  sleep 2
+done
+[ "$up" = y ] || { echo "VM/Docker did not come up — aborting"; "$ORB" stop >/dev/null 2>&1; exit 1; }
 ok "VM up, Docker reachable"
 
 echo "── core ──────────────────────────────────────"
-gdock image inspect alpine >/dev/null 2>&1 || gdock pull alpine >/dev/null 2>&1
-check "$(gdock run --rm alpine echo hi)" "hi" "docker run"
+# Pin --platform on every native run: the Rosetta test below pulls the amd64
+# alpine, which would otherwise repoint the alpine:latest tag and silently make
+# later containers run under emulation. The guest agent merges stderr into the
+# response, so pre-pull quietly first and read only the command's last line.
+gdock pull --platform linux/arm64 alpine >/dev/null 2>&1
+check "$(gdock run --rm --platform linux/arm64 alpine echo hi | tail -1)" "hi" "docker run"
 
 echo "── M1/M2/M3 (efficiency) ─────────────────────"
 # zram (best-effort: may not be present if the module install was capped)
@@ -47,21 +57,29 @@ if gx 'swapon --show=NAME --noheadings 2>/dev/null' | grep -q zram; then ok "zra
 grep -q "balloon target" "$HOME/.openorb/vm.log" 2>/dev/null && ok "memory ballooning active" || echo "  SKIP ballooning (no target logged yet)"
 
 echo "── M2-net (egress) + DNS ─────────────────────"
-check "$(gdock run --rm alpine sh -c 'wget -T8 -qO- http://1.1.1.1 >/dev/null 2>&1 && echo y || echo n')" "y" "container egress"
-check "$(gdock run --rm alpine sh -c 'nslookup example.com >/dev/null 2>&1 && echo y || echo n')" "y" "container DNS resolve"
+# Probe egress with HTTPS to a stable host (http://1.1.1.1 answers with a 301
+# redirect, which makes busybox wget exit non-zero — a false negative). Resolve
+# against an explicit server so the check is independent of DNS-follow timing.
+check "$(gdock run --rm --platform linux/arm64 alpine sh -c 'wget -T8 -qO- https://example.com >/dev/null 2>&1 && echo y || echo n')" "y" "container egress"
+check "$(gdock run --rm --platform linux/arm64 alpine sh -c 'nslookup example.com 1.1.1.1 >/dev/null 2>&1 && echo y || echo n')" "y" "container DNS resolve"
 
 echo "── VirtioFS + Rosetta ────────────────────────"
 echo "openorb-e2e-$(date +%s)" > "$HERE/share/.e2e"
-check "$(gdock run --rm -v /mnt/mac:/m alpine cat /m/.e2e | grep -c openorb-e2e)" "1" "VirtioFS bind read"
+check "$(gdock run --rm --platform linux/arm64 -v /mnt/mac:/m alpine cat /m/.e2e | grep -c openorb-e2e)" "1" "VirtioFS bind read"
 rm -f "$HERE/share/.e2e"
 gdock pull --platform linux/amd64 alpine >/dev/null 2>&1
 check "$(gdock run --rm --platform linux/amd64 alpine uname -m)" "x86_64" "Rosetta amd64"
+# The amd64 pull repointed alpine:latest; restore arm64 as the default so
+# `machine create` (which takes no --platform) runs a native rootfs.
+gdock pull --platform linux/arm64 alpine >/dev/null 2>&1
 
 echo "── M3-stage port forwarding ──────────────────"
 gdock rm -f e2eweb >/dev/null 2>&1
-gdock run -d --name e2eweb -p 18080:80 alpine sh -c 'mkdir -p /w; echo PFOK>/w/i; httpd -f -p 80 -h /w' >/dev/null 2>&1
-sleep 5
-r=""; for _ in 1 2 3 4 5; do r=$(curl -s --max-time 3 http://127.0.0.1:18080/i 2>/dev/null); [ -n "$r" ] && break; sleep 2; done
+gdock run -d --name e2eweb -p 18080:80 --platform linux/arm64 alpine sh -c 'mkdir -p /w; echo PFOK>/w/i; exec httpd -f -p 80 -h /w' >/dev/null 2>&1
+# Wait for the container to actually reach "running" before probing (a busy host
+# can take a few seconds to start it), then poll the forwarded port.
+for _ in $(seq 1 10); do [ "$(gdock inspect -f '{{.State.Status}}' e2eweb 2>/dev/null)" = running ] && break; sleep 1; done
+r=""; for _ in $(seq 1 8); do r=$(curl -s --max-time 3 http://127.0.0.1:18080/i 2>/dev/null); [ -n "$r" ] && break; sleep 2; done
 check "$r" "PFOK" "port forward → localhost"
 gdock rm -f e2eweb >/dev/null 2>&1
 
@@ -70,14 +88,24 @@ gx 'grep -q nameserver /etc/resolv.conf && echo y || echo n' | grep -q y && ok "
 
 echo "── M7 machines ───────────────────────────────"
 "$ORB" machine create e2ebox alpine >/dev/null 2>&1
-check "$("$ORB" machine exec e2ebox cat /etc/os-release 2>/dev/null | grep -c Alpine)" "1" "machine create+exec"
+check "$("$ORB" machine exec e2ebox cat /etc/os-release 2>/dev/null | grep -c '^ID=alpine')" "1" "machine create+exec"
 "$ORB" machine delete e2ebox >/dev/null 2>&1
 
 if [ "${SKIP_K8S:-0}" != 1 ]; then
   echo "── M6 Kubernetes ─────────────────────────────"
-  "$ORB" k8s enable >/dev/null 2>&1
-  r=$(curl -sk --max-time 8 https://127.0.0.1:6443/version 2>/dev/null | grep -c gitVersion)
-  check "$r" "1" "k3s API reachable from macOS"
+  if command -v kubectl >/dev/null 2>&1; then
+    "$ORB" k8s enable >/dev/null 2>&1
+    # /version is auth-gated on k3s, so a bare curl returns 401. Use the written
+    # kubeconfig and wait for the node to report Ready (k3s needs a moment).
+    kc="$HOME/.openorb/kube/config"
+    r=n; for _ in $(seq 1 40); do
+      KUBECONFIG="$kc" kubectl get nodes --no-headers 2>/dev/null | grep -q ' Ready' && { r=y; break; }
+      sleep 2
+    done
+    check "$r" "y" "k3s node Ready (kubectl)"
+  else
+    echo "  SKIP k8s (kubectl not installed on host)"
+  fi
 fi
 
 echo "==> stop"

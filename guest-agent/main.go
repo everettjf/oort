@@ -17,6 +17,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -26,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -35,9 +37,26 @@ const (
 	agentPort   = 2376
 	forwardPort = 2377
 	dockerSock  = "/run/docker.sock"
+
+	// Bound every exec so a single hung command (a wedged `docker` call, a
+	// process that never exits) can't leak its goroutine + fds + child process
+	// forever. Left unbounded, these accumulate until the process hits its fd
+	// limit, at which point accept() spins and the whole agent goes dark.
+	execTimeout = 110 * time.Second
+	// Cap concurrent execs so a burst can't exhaust fds/PIDs either.
+	maxConcurrentExec = 64
 )
 
+var execSem = make(chan struct{}, maxConcurrentExec)
+
 func main() {
+	// Give plenty of fd headroom: the host opens many short-lived docker/exec
+	// connections, and a transient pile-up must not exhaust the table.
+	var lim unix.Rlimit
+	if unix.Getrlimit(unix.RLIMIT_NOFILE, &lim) == nil {
+		lim.Cur = lim.Max
+		_ = unix.Setrlimit(unix.RLIMIT_NOFILE, &lim)
+	}
 	var wg sync.WaitGroup
 	wg.Add(3)
 	go func() { defer wg.Done(); serve(dockerPort, handleDocker) }()
@@ -70,6 +89,10 @@ func serve(port uint32, handler func(*os.File)) {
 			if err == unix.EINTR {
 				continue
 			}
+			// Back off on real errors (notably EMFILE/ENFILE under fd
+			// pressure) instead of busy-looping at 100% CPU — a spin here
+			// starves every handler and makes the agent appear dead.
+			time.Sleep(20 * time.Millisecond)
 			continue
 		}
 		conn := os.NewFile(uintptr(nfd), "vsock")
@@ -139,7 +162,29 @@ func handleExec(conn *os.File) {
 	if cmd == "" {
 		cmd = "echo openorb-guest ok"
 	}
-	out, _ := exec.Command("/bin/sh", "-c", cmd).CombinedOutput()
+
+	// Limit concurrency so a burst of execs can't exhaust fds/PIDs.
+	execSem <- struct{}{}
+	defer func() { <-execSem }()
+
+	// Run in its own process group and bound it with a timeout, so a hung
+	// command is killed (whole group, including grandchildren) rather than
+	// leaking forever.
+	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
+	defer cancel()
+	c := exec.CommandContext(ctx, "/bin/sh", "-c", cmd)
+	c.SysProcAttr = &unix.SysProcAttr{Setpgid: true}
+	c.Cancel = func() error {
+		if c.Process != nil {
+			// Negative pid → signal the whole process group.
+			_ = unix.Kill(-c.Process.Pid, unix.SIGKILL)
+		}
+		return nil
+	}
+	out, _ := c.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		out = append(out, []byte(fmt.Sprintf("\nopenorb-guest: command timed out after %s\n", execTimeout))...)
+	}
 	fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Length: %s\r\nConnection: close\r\n\r\n",
 		strconv.Itoa(len(out)))
 	conn.Write(out)

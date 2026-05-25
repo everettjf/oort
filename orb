@@ -237,7 +237,11 @@ cmd_machine() {
       ;;
     exec)
       local name="${1:?usage: orb machine exec <name> <cmd...>}"; shift
-      cmd_docker exec "$MACHINE_PREFIX$name" "$@"
+      # Route through the guest agent (docker exec runs locally against
+      # /run/docker.sock inside the guest). Going through the host docker CLI
+      # over the vsock socket proxy loses output, because `docker exec` uses a
+      # hijacked/upgraded bidirectional stream the proxy doesn't carry cleanly.
+      cmd_exec docker exec "$MACHINE_PREFIX$name" "$@"
       ;;
     shell)
       local name="${1:?usage: orb machine shell <name>}"
