@@ -37,10 +37,11 @@ bin() {
   # on every start (it takes the .build package lock, which deadlocks if a
   # previous run is mid-build). Only build when the binary is actually missing.
   local b="$HERE/.build/release/openorb"
-  if [ ! -x "$b" ]; then
-    (cd "$HERE" && swift build -c release >/dev/null)
-    codesign --force --sign - --entitlements "$HERE/openorb.entitlements" "$b" >/dev/null 2>&1
-  fi
+  [ -x "$b" ] || (cd "$HERE" && swift build -c release >/dev/null)
+  # ALWAYS (re)apply the entitlement: a plain `swift build` strips the ad-hoc
+  # signature, and VZ refuses to launch without com.apple.security.virtualization
+  # (VZErrorDomain Code=2). Signing is cheap and idempotent.
+  codesign --force --sign - --entitlements "$HERE/openorb.entitlements" "$b" >/dev/null 2>&1
   echo "$b"
 }
 
