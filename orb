@@ -17,6 +17,7 @@
 #   orb route enable|disable  reach containers by their docker0 IP (sudo)
 #   orb k8s enable|disable    run Kubernetes (k3s) in the guest
 #   orb machine ...           manage named Linux machines (create/list/shell/…)
+#   orb gui                   launch the native menu-bar app
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -193,6 +194,15 @@ cmd_reset() {
   echo "reset to the golden image."
 }
 
+# Launch the native menu-bar GUI (M8). Builds it if needed, then runs the
+# menu-bar agent (status, start/stop, DOCKER_HOST).
+cmd_gui() {
+  local g="$HERE/.build/release/openorb-gui"
+  [ -x "$g" ] || (cd "$HERE" && swift build -c release >/dev/null)
+  OPENORB_HOME="$HERE" nohup "$g" >/dev/null 2>&1 &
+  echo "openorb menu-bar app launched (look for the box icon in the menu bar)."
+}
+
 # Named Linux machines (M7): persistent, multi-distro environments you can shell
 # into — OrbStack's "machines". Backed by long-lived containers on the shared
 # guest kernel (leverages the working Docker engine; no extra packages). A
@@ -336,6 +346,7 @@ case "${1:-help}" in
   route)        shift; cmd_route "$@";;
   k8s)          shift; cmd_k8s "$@";;
   machine)      shift; cmd_machine "$@";;
-  help|-h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//';;
+  gui)          shift; cmd_gui "$@";;
+  help|-h|--help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//';;
   *) echo "unknown command: $1"; echo "run 'orb help'"; exit 1;;
 esac

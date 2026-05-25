@@ -10,6 +10,10 @@ let package = Package(
         .executableTarget(
             name: "openorb",
             path: "Sources/openorb"
+        ),
+        .executableTarget(
+            name: "openorb-gui",
+            path: "Sources/openorb-gui"
         )
     ]
 )
