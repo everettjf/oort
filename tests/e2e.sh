@@ -42,6 +42,20 @@ done
 [ "$up" = y ] || { echo "VM/Docker did not come up — aborting"; "$ORB" stop >/dev/null 2>&1; exit 1; }
 ok "VM up, Docker reachable"
 
+# Container networking (the docker0 NAT path + DNS) takes a few seconds to settle
+# after a fresh boot — longer than the daemon itself. Warm it up before the
+# network-dependent checks so they test the steady state, not the boot race.
+printf "   warming container network"
+gdock pull --platform linux/arm64 alpine >/dev/null 2>&1
+# Gate on OUTPUT, not exit code: the guest agent always answers HTTP 200, so the
+# exit status of an `orb exec` never reflects the inner command. Poll until a
+# container can actually reach the internet (or give up after ~60s).
+for _ in $(seq 1 30); do
+  [ "$(gdock run --rm --platform linux/arm64 alpine sh -c 'wget -T5 -qO- https://example.com >/dev/null 2>&1 && echo ok')" = ok ] && break
+  printf "."; sleep 2
+done
+echo
+
 echo "── core ──────────────────────────────────────"
 # Pin --platform on every native run: the Rosetta test below pulls the amd64
 # alpine, which would otherwise repoint the alpine:latest tag and silently make
