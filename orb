@@ -16,6 +16,7 @@
 #   orb reset                 restore the disk from the golden snapshot
 #   orb route enable|disable  reach containers by their docker0 IP (sudo)
 #   orb k8s enable|disable    run Kubernetes (k3s) in the guest
+#   orb machine ...           manage named Linux machines (create/list/shell/…)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -192,6 +193,42 @@ cmd_reset() {
   echo "reset to the golden image."
 }
 
+# Named Linux machines (M7): persistent, multi-distro environments you can shell
+# into — OrbStack's "machines". Backed by long-lived containers on the shared
+# guest kernel (leverages the working Docker engine; no extra packages). A
+# machine is a container named ovm-<name> running an idle init you exec into.
+MACHINE_PREFIX="ovm-"
+cmd_machine() {
+  local sub="${1:-list}"; shift || true
+  case "$sub" in
+    create)
+      local name="${1:?usage: orb machine create <name> [distro]}" distro="${2:-ubuntu}"
+      cmd_docker image inspect "$distro" >/dev/null 2>&1 || { echo "pulling $distro…"; cmd_docker pull "$distro" >/dev/null; }
+      cmd_docker run -d --name "$MACHINE_PREFIX$name" --hostname "$name" --restart unless-stopped \
+        "$distro" sh -c 'while :; do sleep 3600; done' >/dev/null \
+        && echo "machine '$name' ($distro) created — 'orb machine shell $name'"
+      ;;
+    list|ls)
+      echo "NAME            DISTRO          STATUS"
+      cmd_docker ps -a --filter "name=$MACHINE_PREFIX" --format '{{.Names}}\t{{.Image}}\t{{.Status}}' \
+        | sed "s/^$MACHINE_PREFIX//" | awk -F'\t' '{printf "%-15s %-15s %s\n",$1,$2,$3}'
+      ;;
+    exec)
+      local name="${1:?usage: orb machine exec <name> <cmd...>}"; shift
+      cmd_docker exec "$MACHINE_PREFIX$name" "$@"
+      ;;
+    shell)
+      local name="${1:?usage: orb machine shell <name>}"
+      cmd_docker exec -it "$MACHINE_PREFIX$name" sh -c 'command -v bash >/dev/null 2>&1 && exec bash || exec sh'
+      ;;
+    delete|rm)
+      local name="${1:?usage: orb machine delete <name>}"
+      cmd_docker rm -f "$MACHINE_PREFIX$name" >/dev/null && echo "machine '$name' deleted"
+      ;;
+    *) echo "usage: orb machine create|list|exec|shell|delete <name> [distro]";;
+  esac
+}
+
 # Kubernetes via k3s in the guest (M6). Installs k3s, projects its API server
 # (guest 127.0.0.1:6443) onto the Mac's localhost:6443 (static tcp-forward), and
 # writes a kubeconfig. `orb start` adds the 6443 forward whenever k8s is enabled.
@@ -298,6 +335,7 @@ case "${1:-help}" in
   reset)        shift; cmd_reset "$@";;
   route)        shift; cmd_route "$@";;
   k8s)          shift; cmd_k8s "$@";;
-  help|-h|--help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//';;
+  machine)      shift; cmd_machine "$@";;
+  help|-h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//';;
   *) echo "unknown command: $1"; echo "run 'orb help'"; exit 1;;
 esac
