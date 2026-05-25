@@ -170,5 +170,9 @@ runcmd:
   - systemctl enable --now docker.service
   - systemctl enable --now openorb-guest.service
   - systemctl enable --now openorb-rosetta.service || true
+  # zram lives in linux-modules-extra (not in the base cloud kernel). Install it
+  # once here (egress works) so the golden image has it; ~20s, one-time.
+  - DEBIAN_FRONTEND=noninteractive apt-get update -o Acquire::http::Timeout=20 >/dev/null 2>&1 || true
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)" >/dev/null 2>&1 || true
   - systemctl enable --now openorb-zram.service || true
   - touch /run/openorb-ready

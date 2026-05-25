@@ -161,6 +161,15 @@ cmd_build_image() {
   (cd "$HERE" && ./make-image.sh)
   echo "==> provisioning the image (one-time first boot)…"
   MOUNT_HOME=0 cmd_start >/dev/null   # $HOME share would stall the provisioning boot
+  # Wait for cloud-init to FULLY finish (docker comes up before later runcmd
+  # steps like the zram-module install) — its last step touches this marker.
+  printf "    finishing provisioning"
+  for _ in $(seq 1 90); do
+    curl -s --max-time 5 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
+      'test -e /run/openorb-ready && echo READY' http://localhost/ 2>/dev/null | grep -q READY && break
+    printf "."; sleep 2
+  done
+  echo
   cmd_stop  >/dev/null
   echo "==> snapshotting golden image"
   cp -c "$DISK" "$GOLDEN" 2>/dev/null || cp "$DISK" "$GOLDEN"
