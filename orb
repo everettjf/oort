@@ -31,7 +31,10 @@ SHARE="${OPENORB_SHARE:-$HERE/share}"
 mkdir -p "$STATE"
 
 bin() {
-  local b; b="$(cd "$HERE" && swift build -c release --show-bin-path 2>/dev/null)/openorb"
+  # Use the stable SwiftPM release symlink directly — don't run `swift build`
+  # on every start (it takes the .build package lock, which deadlocks if a
+  # previous run is mid-build). Only build when the binary is actually missing.
+  local b="$HERE/.build/release/openorb"
   if [ ! -x "$b" ]; then
     (cd "$HERE" && swift build -c release >/dev/null)
     codesign --force --sign - --entitlements "$HERE/openorb.entitlements" "$b" >/dev/null 2>&1
