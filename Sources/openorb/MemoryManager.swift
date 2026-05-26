@@ -15,9 +15,15 @@ final class MemoryManager {
     private weak var socketDevice: VZVirtioSocketDevice?
     private let agentPort: UInt32
     private let configuredBytes: UInt64
-    private let minBytes: UInt64 = 512 * 1024 * 1024
-    private let headroomBytes: UInt64 = 384 * 1024 * 1024
-    private let interval: TimeInterval = 20
+    // Floor high enough that a Docker host (dockerd + containerd + a burst of
+    // containers) always has room — an over-aggressive squeeze OOM-kills dockerd
+    // and the guest agent under load. Headroom is generous and proportional.
+    private let minBytes: UInt64 = 2048 * 1024 * 1024
+    private let headroomBytes: UInt64 = 1024 * 1024 * 1024
+    // Reclaim at most this much per tick (inflate slowly); deflate is immediate.
+    private let stepBytes: UInt64 = 256 * 1024 * 1024
+    private let interval: TimeInterval = 15
+    private var currentTarget: UInt64 = 0
 
     init(device: VZVirtioTraditionalMemoryBalloonDevice, vmQueue: DispatchQueue,
          socketDevice: VZVirtioSocketDevice, configuredBytes: UInt64, agentPort: UInt32 = 2376) {
@@ -34,17 +40,32 @@ final class MemoryManager {
     }
 
     private func loop() {
+        // Start at the full configured size and reclaim downward gradually, so we
+        // never begin by yanking memory out from under early boot/provisioning.
+        currentTarget = configuredBytes
+        let mib: UInt64 = 1024 * 1024
         while true {
             Thread.sleep(forTimeInterval: interval)
             guard let (total, available) = queryGuestMemory() else { continue }
             let used = total > available ? total - available : total
-            var target = used + headroomBytes
-            target = min(max(target, minBytes), configuredBytes)
-            // Round to MiB; VZ expects a sane value ≤ configured size.
-            target = (target / (1024 * 1024)) * (1024 * 1024)
-            Log.info("memory: guest using \(used/(1024*1024))MiB → balloon target \(target/(1024*1024))MiB (cap \(configuredBytes/(1024*1024))MiB)")
+            // Generous, proportional headroom: at least 1GiB, or half of current
+            // usage — so a load burst has slack before the next tick reacts.
+            let headroom = max(headroomBytes, used / 2)
+            var desired = used + headroom
+            desired = min(max(desired, minBytes), configuredBytes)
+            desired = (desired / mib) * mib
+            // Hysteresis: give memory back to the guest immediately when usage
+            // rises (deflate fast), but reclaim only `stepBytes` per tick when it
+            // falls (inflate slow). This is what keeps dockerd/the agent alive
+            // through container churn instead of OOM-ing on an aggressive squeeze.
+            let newTarget = desired >= currentTarget
+                ? desired
+                : max(desired, currentTarget > stepBytes ? currentTarget - stepBytes : minBytes)
+            guard newTarget != currentTarget else { continue }
+            currentTarget = newTarget
+            Log.info("memory: guest using \(used/mib)MiB → balloon target \(newTarget/mib)MiB (cap \(configuredBytes/mib)MiB)")
             vmQueue.async { [weak self] in
-                self?.device.targetVirtualMachineMemorySize = target
+                self?.device.targetVirtualMachineMemorySize = newTarget
             }
         }
     }
