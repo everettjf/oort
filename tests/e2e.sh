@@ -51,7 +51,7 @@ gdock pull --platform linux/arm64 alpine >/dev/null 2>&1
 # exit status of an `orb exec` never reflects the inner command. Poll until a
 # container can actually reach the internet (or give up after ~60s).
 for _ in $(seq 1 30); do
-  [ "$(gdock run --rm --platform linux/arm64 alpine sh -c 'wget -T5 -qO- https://example.com >/dev/null 2>&1 && echo ok')" = ok ] && break
+  [ "$(gdock run --rm --platform linux/arm64 alpine sh -c 'wget -T12 -qO- https://example.com >/dev/null 2>&1 && echo ok')" = ok ] && break
   printf "."; sleep 2
 done
 echo
@@ -74,7 +74,7 @@ echo "── M2-net (egress) + DNS ───────────────
 # Probe egress with HTTPS to a stable host (http://1.1.1.1 answers with a 301
 # redirect, which makes busybox wget exit non-zero — a false negative). Resolve
 # against an explicit server so the check is independent of DNS-follow timing.
-check "$(gdock run --rm --platform linux/arm64 alpine sh -c 'wget -T8 -qO- https://example.com >/dev/null 2>&1 && echo y || echo n')" "y" "container egress"
+check "$(gdock run --rm --platform linux/arm64 alpine sh -c 'wget -T12 -qO- https://example.com >/dev/null 2>&1 && echo y || echo n')" "y" "container egress"
 check "$(gdock run --rm --platform linux/arm64 alpine sh -c 'nslookup example.com 1.1.1.1 >/dev/null 2>&1 && echo y || echo n')" "y" "container DNS resolve"
 
 echo "── VirtioFS + Rosetta ────────────────────────"
