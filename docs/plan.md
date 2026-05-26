@@ -17,15 +17,42 @@ filesystem moat last.
 | M2 | zram (kernel-tier efficiency) | ✅ verified |
 | M3 | Active memory ballooning | ✅ verified |
 | M4 | Dev filesystem guidance | ✅ done (docs) |
-| M5 | Networking | 🟡 partial — DNS-following verified; `orb route` + full netstack pending |
-| M6 | Kubernetes (k3s) | 🟢 code-complete — live re-verify pending* |
-| M7 | Multiple machines | 🟢 code-complete — live re-verify pending* |
+| M5 | Networking | 🟡 partial — DNS-following + port-forward verified e2e; `orb route` + full netstack pending |
+| M6 | Kubernetes (k3s) | ✅ verified — `kubectl get nodes` → Ready in the e2e suite |
+| M7 | Multiple machines | ✅ verified — `machine create`+`exec` green in the e2e suite |
 | M8 | Native menu-bar GUI | ✅ builds & launches (UI not visually verified headless) |
 | M9 | Native-speed filesystem | ⛔ not started (the hard moat) |
 
-\* M6/M7 are implemented and reuse verified paths, but a clean end-to-end run
-couldn't be completed in the build session — the local VZ environment kept
-failing to boot a VM reliably. Re-verify on a fresh machine state.
+## Phase 0 hardening — what the verification push found & fixed
+
+A long verification push turned the suite from chaos into a reliable 9/12 and
+root-caused the real reliability bugs (all fixed, see git log):
+
+1. **Binary signing** — `orb` only codesigned the VZ binary when it *built* it;
+   any rebuild left it unsigned → VZ refused to boot (`VZErrorDomain Code=2`).
+   This was the core "VM won't boot" cause. Now `bin()` always re-signs.
+2. **Bash 3.2 array crash** — `orb start` aborted on stock macOS bash whenever
+   k8s wasn't enabled (empty array under `set -u`). Fixed with the 3.2-safe
+   expansion.
+3. **`machine exec`** — ran `docker exec` over the host socket, which loses
+   hijacked-stream output; now routed through the guest agent.
+4. **Guest agent hangs** — the exec port could wedge under load (un-timed-out
+   commands leaking fds + a busy-loop on accept errors). Added per-command
+   timeouts, concurrency caps, accept backoff, and a raised fd limit.
+5. **The big one — memory ballooning** (`MemoryManager`): it squeezed the VM to
+   `used+384MiB`, clamping a 4GB guest to ~730MiB when idle, so a container
+   burst OOM-killed dockerd and the agent. *This was the "degrades under load"
+   instability.* Fixed with a 2GB floor, proportional headroom, and hysteresis
+   (deflate fast, reclaim slow). Verified: a 30-container churn that used to
+   kill the agent in ~5 runs now survives all 30.
+
+**Known residual:** fresh-boot non-determinism — docker/the agent occasionally
+take >5min to come up, or container egress is slow for ~60s, on some boots. It's
+**not reproducible on demand** (most boots are fine) and worsened over
+consecutive boots while host load stayed low, pointing at VZ/host-side
+degradation after hours of heavy create/destroy cycling rather than a logic bug.
+Re-verify from a fresh host state (reboot). A disk-level lock to prevent
+concurrent-VM corruption is the next concrete durability fix.
 
 ## Reassessment — the real gap to OrbStack
 
