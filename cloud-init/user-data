@@ -164,7 +164,7 @@ runcmd:
   # stub at 127.0.0.53; bypass it so Docker image pulls resolve reliably.
   - systemctl disable --now systemd-resolved 2>/dev/null || true
   - rm -f /etc/resolv.conf
-  - printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\noptions single-request\n' > /etc/resolv.conf
+  - printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\noptions single-request timeout:2 attempts:1\n' > /etc/resolv.conf
   - systemctl daemon-reload
   # install-docker.sh mounts /mnt/mac, installs the static Docker engine, and
   # stages the openorb-guest binary from the share.

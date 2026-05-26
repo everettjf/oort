@@ -58,7 +58,11 @@ sync_dns() {
   lines=$(scutil --dns 2>/dev/null | awk '/nameserver\[/{print $3}' \
         | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -vE '^(127\.|0\.0\.0\.0)' \
         | awk '!seen[$0]++' | head -3 | sed 's/^/nameserver /')
-  body=$(printf '%s\nnameserver 1.1.1.1\noptions single-request\n' "$lines")
+  # timeout:2 attempts:1 → if the Mac's resolver is slow to answer through VZ NAT
+  # (common right after boot), fail over to 1.1.1.1 in ~2s instead of stalling the
+  # default 5s per server, which otherwise makes container DNS (and any pull/egress
+  # that needs it) intermittently time out.
+  body=$(printf '%s\nnameserver 1.1.1.1\noptions single-request timeout:2 attempts:1\n' "$lines")
   # base64 the multi-line content so it ships cleanly through the agent.
   b64=$(printf '%s' "$body" | base64 | tr -d '\n')
   curl -s --max-time 12 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
