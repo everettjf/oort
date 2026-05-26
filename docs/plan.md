@@ -51,8 +51,17 @@ take >5min to come up, or container egress is slow for ~60s, on some boots. It's
 **not reproducible on demand** (most boots are fine) and worsened over
 consecutive boots while host load stayed low, pointing at VZ/host-side
 degradation after hours of heavy create/destroy cycling rather than a logic bug.
-Re-verify from a fresh host state (reboot). A disk-level lock to prevent
-concurrent-VM corruption is the next concrete durability fix.
+Re-verify from a fresh host state (reboot).
+
+**Durability fixes since:**
+6. **Disk-level lock** (the named next fix) — the engine now takes an exclusive
+   `flock` on the disk image before boot (`DiskLock`), so two VMs can never write
+   the same image at once (the concurrent-writer ext4 corruption that broke later
+   boots). Auto-released by the kernel on exit, so a crash leaves no stale lock.
+7. **`orb start` fails fast** — if the engine exits early (locked disk, VZ boot
+   refusal, …) the wrapper now detects the dead process and prints the real error
+   from `vm.log` immediately, instead of polling for 5 minutes and reporting a
+   generic timeout.
 
 ## Reassessment — the real gap to OrbStack
 

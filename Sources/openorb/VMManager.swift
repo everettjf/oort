@@ -12,10 +12,16 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
     private var portForwarder: PortForwarder?
     private var memoryManager: MemoryManager?
     private var configuredMemory: UInt64 = 0
+    private var diskLock: DiskLock?
 
     init(_ cfg: Config) { self.cfg = cfg }
 
     func startAndProject() throws {
+        // Take an exclusive lock on the disk before touching it, so two VMs can
+        // never write the same image at once (that corrupts the guest fs). Held
+        // for the process lifetime; the kernel drops it automatically on exit.
+        diskLock = try DiskLock(diskImage: cfg.diskImage)
+
         let configuration = try VMConfig.make(cfg)
         configuredMemory = configuration.memorySize
         Log.info("config: cpus=\(configuration.cpuCount) memory=\(configuration.memorySize / (1024*1024))MiB")

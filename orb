@@ -104,11 +104,19 @@ cmd_start() {
     --forward "$AGENT_SOCK:2376" \
     --no-console --console-log "$CONSOLE_LOG" \
     --socket "$DOCKER_SOCK" > "$STATE/vm.log" 2>&1 &
-  echo $! > "$PIDFILE"
+  local vmpid=$!; echo "$vmpid" > "$PIDFILE"
   printf "waiting for Docker"
   # Up to ~5 min: first-boot provisioning (downloading Docker) is the slow case;
   # a reused/golden disk is ready in seconds.
   for _ in $(seq 1 150); do
+    # If the engine exits early (e.g. the disk is locked by another VM, or VZ
+    # refused to boot), don't keep polling for 5 minutes — surface the real
+    # error from vm.log immediately so 'orb start' fails fast and clearly.
+    if ! kill -0 "$vmpid" 2>/dev/null; then
+      echo " failed."; rm -f "$PIDFILE"
+      tail -3 "$STATE/vm.log" 2>/dev/null | sed 's/^/  /'
+      exit 1
+    fi
     # Wait for /version, not just /_ping: _ping goes green a moment before the
     # daemon can actually create containers, which races the first `docker run`.
     if curl -s --max-time 4 --unix-socket "$DOCKER_SOCK" http://localhost/version 2>/dev/null | grep -q '"ApiVersion"'; then
