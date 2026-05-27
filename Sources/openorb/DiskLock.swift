@@ -5,7 +5,7 @@ import Foundation
 /// Two VMs writing the same raw disk at once corrupt the guest ext4 filesystem
 /// and break the next boot's networking — the single most painful durability
 /// bug found during Phase 0 hardening (force-kills + concurrent starts). The
-/// `orb` wrapper has a best-effort `pgrep` guard, but that's racy (TOCTOU) and
+/// `oorb` wrapper has a best-effort `pgrep` guard, but that's racy (TOCTOU) and
 /// pattern-based; this is the real safety net, enforced in the one place every
 /// boot must pass through.
 ///
@@ -29,7 +29,7 @@ final class DiskLock {
             if e == EWOULDBLOCK {
                 throw CLIError.runtime(
                     "disk '\(diskImage.lastPathComponent)' is already in use by another openorb VM — "
-                    + "run 'orb stop' first (concurrent writers would corrupt it)")
+                    + "run 'oorb stop' first (concurrent writers would corrupt it)")
             }
             throw CLIError.runtime("cannot lock disk \(diskImage.path): \(String(cString: strerror(e)))")
         }

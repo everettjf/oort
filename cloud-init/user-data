@@ -22,7 +22,7 @@ bootcmd:
   - [ sysctl, -w, net.ipv6.conf.default.disable_ipv6=1 ]
 
 write_files:
-  # Cap how long systemd waits on units at shutdown so `orb stop` powers off
+  # Cap how long systemd waits on units at shutdown so `oorb stop` powers off
   # quickly and cleanly (a slow docker/unmount can otherwise hang shutdown for
   # 90s+, forcing a kill that corrupts the disk and breaks the next boot).
   - path: /etc/systemd/system.conf.d/10-openorb.conf
@@ -178,7 +178,7 @@ runcmd:
   - systemctl enable --now openorb-guest.service
   - systemctl enable --now openorb-rosetta.service || true
   # Core provisioning is done here — mark ready BEFORE the slow/optional zram step
-  # so `orb start` / build-image never wait on apt (the old reliability sink).
+  # so `oorb start` / build-image never wait on apt (the old reliability sink).
   - touch /run/openorb-ready
   # zram (module install + swap) runs in the background, time-capped, never blocks.
   - systemctl enable openorb-zram.service || true

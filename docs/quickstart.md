@@ -39,7 +39,7 @@ curl -fL -o images/noble-arm64.img \
 ## 3. Build the disk + seed + agent
 
 ```bash
-./orb build-image
+./oorb build-image
 ```
 
 This (see `make-image.sh`):
@@ -53,11 +53,11 @@ Afterwards you'll have `images/disk.img` and `images/seed.img`.
 ## 4. Start
 
 ```bash
-./orb start
+./oorb start
 ```
 
 First boot provisions itself **without apt** (installs the static Docker engine, starts the
-guest agent, mounts the shares, registers Rosetta). `orb start` waits until Docker is ready,
+guest agent, mounts the shares, registers Rosetta). `oorb start` waits until Docker is ready,
 then prints `DOCKER_HOST`.
 
 > First provisioning is usually tens of seconds (depends on the Docker CDN). Reusing the same
@@ -76,14 +76,14 @@ docker ps
 Or use the built-in passthrough (no `DOCKER_HOST` needed):
 
 ```bash
-orb docker run --rm hello-world
+oorb docker run --rm hello-world
 ```
 
 Print the env to add to your shell:
 
 ```bash
-orb env            # prints: export DOCKER_HOST=unix://...
-eval "$(orb env)"
+oorb env            # prints: export DOCKER_HOST=unix://...
+eval "$(oorb env)"
 ```
 
 ## 6. File sharing
@@ -93,7 +93,7 @@ in a container to read/write host files:
 
 ```bash
 echo hello > share/note.txt
-orb docker run --rm -v /mnt/mac:/m alpine cat /m/note.txt   # prints hello
+oorb docker run --rm -v /mnt/mac:/m alpine cat /m/note.txt   # prints hello
 ```
 
 > Note: `/mnt/mac` in `-v /mnt/mac:/m` is a path **inside the guest** (the VirtioFS mountpoint),
@@ -102,7 +102,7 @@ orb docker run --rm -v /mnt/mac:/m alpine cat /m/note.txt   # prints hello
 ## 7. Run x86 images (Rosetta)
 
 ```bash
-orb docker run --rm --platform linux/amd64 alpine uname -m   # prints x86_64
+oorb docker run --rm --platform linux/amd64 alpine uname -m   # prints x86_64
 ```
 
 ## 8. Port forwarding
@@ -110,32 +110,32 @@ orb docker run --rm --platform linux/amd64 alpine uname -m   # prints x86_64
 A container's published ports appear automatically on the macOS `localhost`:
 
 ```bash
-orb docker run -d -p 8080:80 nginx
+oorb docker run -d -p 8080:80 nginx
 curl http://localhost:8080/        # just works
 ```
 
 ## 9. Run commands in the guest
 
 ```bash
-orb exec 'uname -a'
-orb exec 'systemctl status docker --no-pager | head'
-orb shell                # simple line-at-a-time shell
+oorb exec 'uname -a'
+oorb exec 'systemctl status docker --no-pager | head'
+oorb shell                # simple line-at-a-time shell
 ```
 
 ## 10. Status / stop
 
 ```bash
-orb status               # VM and Docker status
-orb logs                 # tail the guest console log
-orb stop                 # clean shutdown
+oorb status               # VM and Docker status
+oorb logs                 # tail the guest console log
+oorb stop                 # clean shutdown
 ```
 
 ## One-liner
 
 ```bash
-./orb build-image && ./orb start && eval "$(./orb env)"
+./oorb build-image && ./oorb start && eval "$(./oorb env)"
 docker run --rm hello-world
-./orb stop
+./oorb stop
 ```
 
 Hit a snag? See the **[FAQ](./faq.md)**; for internals see **[Architecture](./architecture.md)**.

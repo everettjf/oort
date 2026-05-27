@@ -7,7 +7,7 @@
 //	      macOS host's `openorb` proxy projects the Docker API onto a Unix
 //	      socket. (Replaces the socat/Python forwarder.)
 //	2376  Exec agent    — read an HTTP request whose body is a shell command,
-//	      run it, return combined stdout+stderr. Powers `orb exec` and
+//	      run it, return combined stdout+stderr. Powers `oorb exec` and
 //	      headless diagnostics.
 //
 // Why Go: the earlier Python services were getting killed/wedged under memory

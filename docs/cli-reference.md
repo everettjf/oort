@@ -2,44 +2,44 @@
 
 [**English**](./cli-reference.md) | [简体中文](./cli-reference.zh-CN.md)
 
-Every `orb` subcommand, plus all flags of the underlying engine `openorb run`.
+Every `oorb` subcommand, plus all flags of the underlying engine `openorb run`.
 
-## `orb` — the front-end
+## `oorb` — the front-end
 
-`orb` is a thin wrapper around `openorb run` that codifies common launch flags and adds
+`oorb` is a thin wrapper around `openorb run` that codifies common launch flags and adds
 lifecycle / exec / passthrough conveniences.
 
 | Command | Description |
 |---|---|
-| `orb start` | Boot the VM (Docker + file sharing + Rosetta + port forwarding); wait until Docker is ready and print `DOCKER_HOST` |
-| `orb stop` | Cleanly shut the VM down |
-| `orb restart` | stop then start |
-| `orb status` | Show VM and Docker status |
-| `orb exec <cmd...>` | Run a command in the guest (via the vsock agent) |
-| `orb shell` | Simple line-at-a-time guest shell |
-| `orb docker <args...>` | Run `docker` against the openorb daemon |
-| `orb env` | Print `export DOCKER_HOST=...`; use `eval "$(orb env)"` |
-| `orb logs` | Tail the guest console log |
-| `orb build-image` | (Re)build the boot disk + cloud-init seed + cross-compile the agent |
-| `orb help` | Show help |
+| `oorb start` | Boot the VM (Docker + file sharing + Rosetta + port forwarding); wait until Docker is ready and print `DOCKER_HOST` |
+| `oorb stop` | Cleanly shut the VM down |
+| `oorb restart` | stop then start |
+| `oorb status` | Show VM and Docker status |
+| `oorb exec <cmd...>` | Run a command in the guest (via the vsock agent) |
+| `oorb shell` | Simple line-at-a-time guest shell |
+| `oorb docker <args...>` | Run `docker` against the openorb daemon |
+| `oorb env` | Print `export DOCKER_HOST=...`; use `eval "$(oorb env)"` |
+| `oorb logs` | Tail the guest console log |
+| `oorb build-image` | (Re)build the boot disk + cloud-init seed + cross-compile the agent |
+| `oorb help` | Show help |
 
 ### Examples
 
 ```bash
-./orb build-image
-./orb start
-eval "$(./orb env)"
+./oorb build-image
+./oorb start
+eval "$(./oorb env)"
 
 docker run --rm hello-world
-orb docker ps
-orb exec 'free -m'
-orb status
-orb stop
+oorb docker ps
+oorb exec 'free -m'
+oorb status
+oorb stop
 ```
 
 ### Environment variables
 
-`orb` lets you override default paths:
+`oorb` lets you override default paths:
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -52,7 +52,7 @@ Host-side state lives under `~/.openorb/`:
 | File | Purpose |
 |---|---|
 | `~/.openorb/docker.sock` | projected Docker socket (`DOCKER_HOST` points here) |
-| `~/.openorb/agent.sock` | exec agent (used by `orb exec`, forwarded to vsock 2376) |
+| `~/.openorb/agent.sock` | exec agent (used by `oorb exec`, forwarded to vsock 2376) |
 | `~/.openorb/console.log` | guest console log |
 | `~/.openorb/vm.pid` / `vm.log` | VM process PID / log |
 
@@ -60,7 +60,7 @@ Host-side state lives under `~/.openorb/`:
 
 ## `openorb run` — the engine
 
-This is what `orb` ultimately invokes. Use it directly for full control (first
+This is what `oorb` ultimately invokes. Use it directly for full control (first
 `swift build -c release` and codesign, or use `./run.sh`).
 
 ```
@@ -111,7 +111,7 @@ openorb run --disk <path> [options]
 
 ### Equivalent
 
-`orb start` is roughly equivalent to:
+`oorb start` is roughly equivalent to:
 
 ```bash
 openorb run \
@@ -131,7 +131,7 @@ openorb run \
 | vsock port | Service |
 |---|---|
 | 2375 | Docker bridge (→ `/run/docker.sock`) |
-| 2376 | exec (`orb exec` / `orb shell`) |
+| 2376 | exec (`oorb exec` / `oorb shell`) |
 | 2377 | TCP port forwarding |
 
 The host can only reach these through the `VZVirtioSocketDevice` owned by the openorb process,

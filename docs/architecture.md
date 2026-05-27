@@ -13,7 +13,7 @@ layer is implemented.
 
 ```
    ┌─ macOS (host) ─────────────────────────────┐        ┌─ Linux VM (Virtualization.framework) ─┐
-   │  docker CLI / orb                          │        │  openorb-guest (Go binary):           │
+   │  docker CLI / oorb                          │        │  openorb-guest (Go binary):           │
    │     │ DOCKER_HOST=unix://~/.openorb/...     │        │    vsock 2375 → /run/docker.sock      │
    │     ▼                                       │ vsock  │    vsock 2376 → exec                   │
    │  openorb (Swift main program)               │◀──────▶│    vsock 2377 → tcp port-forward      │
@@ -41,7 +41,7 @@ services "projected" onto macOS over virtio-vsock so stock tools work unchanged.
 
 VZ uses Apple Silicon's hardware virtualization directly — near-zero CPU overhead, 1–2s boot.
 At runtime it needs the `com.apple.security.virtualization` entitlement, so the binary must be
-codesigned (`run.sh` / `orb` do this automatically).
+codesigned (`run.sh` / `oorb` do this automatically).
 
 `VMManager.swift` owns the lifecycle: **all VZ calls must happen on one serial queue** (a hard
 VZ requirement), so the VM is created with `VZVirtualMachine(configuration:queue:)` and start/
@@ -74,7 +74,7 @@ docker CLI → ~/.openorb/docker.sock  →  [vsock 2375]  →  openorb-guest  �
 | Port | Role |
 |---|---|
 | 2375 | Docker bridge (→ `/run/docker.sock`) |
-| 2376 | exec: read an HTTP body as a shell command, run it, return output (backend for `orb exec`) |
+| 2376 | exec: read an HTTP body as a shell command, run it, return output (backend for `oorb exec`) |
 | 2377 | TCP forward: read a target port, dial guest `127.0.0.1:port`, splice (for port forwarding) |
 
 > **Another bug worth remembering**: these services were first written in Python, but under

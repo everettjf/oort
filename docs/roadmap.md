@@ -12,13 +12,13 @@ goal is to reproduce the core experience and close the gap to OrbStack step by s
 **Stages 1–4** (the working core):
 - Boot a lightweight Linux VM via `Virtualization.framework`.
 - Project the Docker engine onto a macOS Unix socket over `virtio-vsock`.
-- VirtioFS file sharing; Rosetta x86-64; container port forwarding; the `orb` CLI.
+- VirtioFS file sharing; Rosetta x86-64; container port forwarding; the `oorb` CLI.
 - Compiled Go guest agent (docker bridge + exec + tcp-forward), apt-free provisioning.
 
 **Hardening (since v0.1.0):**
 - **Container networking** — dockerd-managed iptables NAT; `docker build` and runtime egress work.
 - **Reliability** — graceful shutdown, a pinned NIC MAC so reused-disk boots keep networking,
-  `/version`-gated startup, `orb autostart` at login.
+  `/version`-gated startup, `oorb autostart` at login.
 - **Home mirroring** — the Mac home is mounted at the same path in the guest, so
   `docker -v $PWD:/app` works for any project.
 - **Follows the Mac's DNS** — internal / VPN domains resolve inside containers.

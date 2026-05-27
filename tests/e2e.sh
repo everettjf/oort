@@ -2,7 +2,7 @@
 # openorb end-to-end test suite (Phase 0.2).
 #
 # Exercises the whole stack on a real VM and fails red on any regression — the
-# guard against "unverified commits". Runs guest-side via `orb exec` where it
+# guard against "unverified commits". Runs guest-side via `oorb exec` where it
 # can (reliable, avoids the Docker Desktop CLI) and from macOS for the bits that
 # must work host-side (port forwarding, DNS following, the k8s API).
 #
@@ -11,7 +11,7 @@
 #   SKIP_K8S=1 ...         # skip the (slow) Kubernetes check
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
-ORB="$HERE/orb"
+ORB="$HERE/oorb"
 FRESH="${FRESH:-1}"
 PASS=0; FAIL=0; FAILED=()
 
@@ -48,7 +48,7 @@ ok "VM up, Docker reachable"
 printf "   warming container network"
 gdock pull --platform linux/arm64 alpine >/dev/null 2>&1
 # Gate on OUTPUT, not exit code: the guest agent always answers HTTP 200, so the
-# exit status of an `orb exec` never reflects the inner command. Poll until a
+# exit status of an `oorb exec` never reflects the inner command. Poll until a
 # container can actually reach the internet (or give up after ~60s).
 for _ in $(seq 1 30); do
   [ "$(gdock run --rm --platform linux/arm64 alpine sh -c 'wget -T12 -qO- https://example.com >/dev/null 2>&1 && echo ok')" = ok ] && break

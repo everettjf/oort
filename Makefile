@@ -19,7 +19,7 @@ guest:
 lint:
 	swift build -c release >/dev/null
 	cd guest-agent && go vet ./...
-	@command -v shellcheck >/dev/null && shellcheck -S warning orb tests/e2e.sh make-image.sh || echo "shellcheck not installed; skipping"
+	@command -v shellcheck >/dev/null && shellcheck -S warning oorb tests/e2e.sh make-image.sh || echo "shellcheck not installed; skipping"
 
 # Full end-to-end suite on a real VM (needs an Apple-silicon host with VZ).
 verify:

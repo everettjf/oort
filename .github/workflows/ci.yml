@@ -47,4 +47,4 @@ jobs:
       - name: shellcheck
         run: |
           brew install shellcheck >/dev/null
-          shellcheck -S warning orb tests/e2e.sh make-image.sh run.sh
+          shellcheck -S warning oorb tests/e2e.sh make-image.sh run.sh

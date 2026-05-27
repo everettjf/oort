@@ -2,43 +2,43 @@
 
 [English](./cli-reference.md) | **简体中文**
 
-包含 `orb` 命令行的全部子命令，以及底层引擎 `openorb run` 的全部参数。
+包含 `oorb` 命令行的全部子命令，以及底层引擎 `openorb run` 的全部参数。
 
-## `orb` —— 命令行入口
+## `oorb` —— 命令行入口
 
-`orb` 是对 `openorb run` 的轻量封装，固化了常用的启动参数并提供生命周期/执行/透传等便捷命令。
+`oorb` 是对 `openorb run` 的轻量封装，固化了常用的启动参数并提供生命周期/执行/透传等便捷命令。
 
 | 命令 | 说明 |
 |---|---|
-| `orb start` | 启动 VM（Docker + 文件共享 + Rosetta + 端口转发），等待 Docker 就绪并打印 `DOCKER_HOST` |
-| `orb stop` | 干净关闭 VM |
-| `orb restart` | 先 stop 再 start |
-| `orb status` | 显示 VM 与 Docker 状态 |
-| `orb exec <命令...>` | 在客户机里执行一条命令（经 vsock agent） |
-| `orb shell` | 简易交互式客户机 shell（逐行执行） |
-| `orb docker <参数...>` | 以 openorb 守护进程为目标运行 `docker` |
-| `orb env` | 打印 `export DOCKER_HOST=...`，可 `eval "$(orb env)"` |
-| `orb logs` | tail 客户机控制台日志 |
-| `orb build-image` | （重新）构建启动盘 + cloud-init seed + 编译客户机 agent |
-| `orb help` | 显示帮助 |
+| `oorb start` | 启动 VM（Docker + 文件共享 + Rosetta + 端口转发），等待 Docker 就绪并打印 `DOCKER_HOST` |
+| `oorb stop` | 干净关闭 VM |
+| `oorb restart` | 先 stop 再 start |
+| `oorb status` | 显示 VM 与 Docker 状态 |
+| `oorb exec <命令...>` | 在客户机里执行一条命令（经 vsock agent） |
+| `oorb shell` | 简易交互式客户机 shell（逐行执行） |
+| `oorb docker <参数...>` | 以 openorb 守护进程为目标运行 `docker` |
+| `oorb env` | 打印 `export DOCKER_HOST=...`，可 `eval "$(oorb env)"` |
+| `oorb logs` | tail 客户机控制台日志 |
+| `oorb build-image` | （重新）构建启动盘 + cloud-init seed + 编译客户机 agent |
+| `oorb help` | 显示帮助 |
 
 ### 示例
 
 ```bash
-./orb build-image
-./orb start
-eval "$(./orb env)"
+./oorb build-image
+./oorb start
+eval "$(./oorb env)"
 
 docker run --rm hello-world
-orb docker ps
-orb exec 'free -m'
-orb status
-orb stop
+oorb docker ps
+oorb exec 'free -m'
+oorb status
+oorb stop
 ```
 
 ### 环境变量
 
-`orb` 支持用环境变量覆盖默认路径：
+`oorb` 支持用环境变量覆盖默认路径：
 
 | 变量 | 默认值 | 含义 |
 |---|---|---|
@@ -51,7 +51,7 @@ orb stop
 | 文件 | 用途 |
 |---|---|
 | `~/.openorb/docker.sock` | 投影的 Docker socket（`DOCKER_HOST` 指向它） |
-| `~/.openorb/agent.sock` | exec agent（`orb exec` 用，转发到 vsock 2376） |
+| `~/.openorb/agent.sock` | exec agent（`oorb exec` 用，转发到 vsock 2376） |
 | `~/.openorb/console.log` | 客户机控制台日志 |
 | `~/.openorb/vm.pid` / `vm.log` | VM 进程 PID / 日志 |
 
@@ -59,7 +59,7 @@ orb stop
 
 ## `openorb run` —— 底层引擎
 
-`orb` 最终调用的就是它。直接用 `openorb run` 可获得完全控制（先 `swift build -c release` 并 codesign，或用 `./run.sh`）。
+`oorb` 最终调用的就是它。直接用 `openorb run` 可获得完全控制（先 `swift build -c release` 并 codesign，或用 `./run.sh`）。
 
 ```
 openorb run --disk <path> [选项]
@@ -109,7 +109,7 @@ openorb run --disk <path> [选项]
 
 ### 等价示例
 
-`orb start` 大致等价于：
+`oorb start` 大致等价于：
 
 ```bash
 openorb run \
@@ -129,7 +129,7 @@ openorb run \
 | vsock 端口 | 服务 |
 |---|---|
 | 2375 | Docker 桥（→ `/run/docker.sock`） |
-| 2376 | exec（`orb exec` / `orb shell`） |
+| 2376 | exec（`oorb exec` / `oorb shell`） |
 | 2377 | TCP 端口转发（端口转发用） |
 
 宿主只能通过 openorb 进程拥有的 `VZVirtioSocketDevice` 访问这些端口，因此都经 `--forward` 或内置代理暴露。

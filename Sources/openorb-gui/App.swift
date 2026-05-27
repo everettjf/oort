@@ -3,7 +3,7 @@ import Foundation
 
 // M8: a minimal native menu-bar app wrapping the openorb engine. It shows live
 // status (VM running, Docker version, container count) read straight from the
-// pidfile and the projected Docker socket, and start/stop via the `orb` script.
+// pidfile and the projected Docker socket, and start/stop via the `oorb` script.
 // A small, honest GUI — the surface OrbStack puts in its menu bar.
 
 @main
@@ -16,10 +16,10 @@ struct OpenorbGUIApp: App {
             Text(model.line2).foregroundStyle(.secondary)
             Divider()
             if model.running {
-                Button("Stop openorb") { model.orb("stop") }
+                Button("Stop openorb") { model.oorb("stop") }
                 Button("Copy DOCKER_HOST") { model.copyDockerHost() }
             } else {
-                Button("Start openorb") { model.orb("start") }
+                Button("Start openorb") { model.oorb("start") }
             }
             Button("Refresh") { model.refresh() }
             Divider()
@@ -84,8 +84,8 @@ final class StatusModel: ObservableObject {
         NSPasteboard.general.setString("export DOCKER_HOST=\(dockerHost)", forType: .string)
     }
 
-    /// Run an `orb` subcommand (start/stop) in the background.
-    func orb(_ cmd: String) {
+    /// Run an `oorb` subcommand (start/stop) in the background.
+    func oorb(_ cmd: String) {
         guard let orbPath = locateOrb() else { return }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -96,17 +96,17 @@ final class StatusModel: ObservableObject {
     private func locateOrb() -> String? {
         // OPENORB_HOME, else the repo next to the running executable, else CWD.
         if let h = ProcessInfo.processInfo.environment["OPENORB_HOME"] {
-            let p = "\(h)/orb"; if FileManager.default.isExecutableFile(atPath: p) { return p }
+            let p = "\(h)/oorb"; if FileManager.default.isExecutableFile(atPath: p) { return p }
         }
         let exe = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
         // .build/<...>/release/openorb-gui → walk up to the package root
         var dir = exe.deletingLastPathComponent()
         for _ in 0..<6 {
-            let cand = dir.appendingPathComponent("orb").path
+            let cand = dir.appendingPathComponent("oorb").path
             if FileManager.default.isExecutableFile(atPath: cand) { return cand }
             dir = dir.deletingLastPathComponent()
         }
-        let cwd = "\(FileManager.default.currentDirectoryPath)/orb"
+        let cwd = "\(FileManager.default.currentDirectoryPath)/oorb"
         return FileManager.default.isExecutableFile(atPath: cwd) ? cwd : nil
     }
 

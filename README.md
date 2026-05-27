@@ -29,7 +29,7 @@ fast and light* and reimplements the core mechanisms by hand.
 One command to start, then the stock `docker` CLI just works:
 
 ```console
-$ orb start
+$ oorb start
 starting openorb VM…
 waiting for Docker...... ready.
 export DOCKER_HOST=unix:///Users/you/.openorb/docker.sock
@@ -39,7 +39,7 @@ Hello from Docker!
 
 $ docker run -p 8080:80 nginx     # then `curl localhost:8080` on macOS just works
 $ docker run --platform linux/amd64 alpine uname -m     # x86_64 (via Rosetta)
-$ orb exec 'uname -a'             # run a command inside the guest
+$ oorb exec 'uname -a'             # run a command inside the guest
 ```
 
 ### What works today, **verified on real hardware**
@@ -52,7 +52,7 @@ $ orb exec 'uname -a'             # run a command inside the guest
 | 🧬 **Rosetta x86** | `linux/amd64` images run via Rosetta — far faster than QEMU | ✅ |
 | 🔌 **Port forwarding** | Container-published ports appear automatically on macOS `localhost` (event-driven) | ✅ |
 | 🧭 **Follows Mac DNS** | Guest/containers use the Mac's DNS resolvers — internal/VPN domains resolve | ✅ |
-| 🛰️ **`orb` CLI** | Lifecycle, `orb exec`, docker passthrough, `orb autostart` at login | ✅ |
+| 🛰️ **`oorb` CLI** | Lifecycle, `oorb exec`, docker passthrough, `oorb autostart` at login | ✅ |
 | 💾 **zram swap** | Wired up (needs a kernel with the zram module — see docs) | ⚠️ |
 
 > All verified on **macOS 26.3 / Apple Silicon**, against the project's own daemon.
@@ -70,16 +70,16 @@ curl -fL -o images/noble-arm64.img \
   https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-arm64.img
 
 # 2. Build the boot disk + cloud-init seed + compiled guest agent
-./orb build-image
+./oorb build-image
 
 # 3. Start (waits until Docker is ready, prints DOCKER_HOST)
-./orb start
+./oorb start
 
 # 4. Use it
 export DOCKER_HOST=unix://$HOME/.openorb/docker.sock
 docker run --rm hello-world
-orb status
-orb stop
+oorb status
+oorb stop
 ```
 
 See **[docs/quickstart.md](./docs/quickstart.md)** for the detailed walkthrough.
@@ -90,9 +90,9 @@ See **[docs/quickstart.md](./docs/quickstart.md)** for the detailed walkthrough.
 
 ```
    ┌─ macOS (host) ─────────────────────────────┐        ┌─ Linux VM (Virtualization.framework) ─┐
-   │  docker CLI / orb                          │        │  openorb-guest (Go binary):           │
+   │  docker CLI / oorb                          │        │  openorb-guest (Go binary):           │
    │     │ DOCKER_HOST=unix://~/.openorb/...     │        │    vsock 2375 → /run/docker.sock      │
-   │     ▼                                       │ vsock  │    vsock 2376 → exec (orb exec)       │
+   │     ▼                                       │ vsock  │    vsock 2376 → exec (oorb exec)       │
    │  openorb (Swift)                            │◀──────▶│    vsock 2377 → tcp port-forward      │
    │   ├─ VZ VM control                          │        │  dockerd (static) + containerd        │
    │   ├─ DockerSocketProxy (unix ⇄ vsock 2375)  │        │  VirtioFS: /mnt/mac, /mnt/rosetta     │
@@ -115,7 +115,7 @@ The guest is a stock Ubuntu 24.04 cloud image, provisioned **without apt** on fi
 |---|---|
 | [Quick start](./docs/quickstart.md) · [中文](./docs/quickstart.zh-CN.md) | Install, first run, everyday use |
 | [Architecture](./docs/architecture.md) · [中文](./docs/architecture.zh-CN.md) | How VZ / vsock / VirtioFS / Rosetta / port-forward / the Go agent work |
-| [CLI reference](./docs/cli-reference.md) · [中文](./docs/cli-reference.zh-CN.md) | Every `orb` subcommand + all `openorb run` flags |
+| [CLI reference](./docs/cli-reference.md) · [中文](./docs/cli-reference.zh-CN.md) | Every `oorb` subcommand + all `openorb run` flags |
 | [FAQ](./docs/faq.md) · [中文](./docs/faq.zh-CN.md) | Troubleshooting (DNS, zram, provisioning, coexisting with Docker Desktop) |
 | [Roadmap](./docs/roadmap.md) · [中文](./docs/roadmap.zh-CN.md) | What's done and what's next |
 | [Plan](./docs/plan.md) · [中文](./docs/plan.zh-CN.md) | Step-by-step plan to catch up to OrbStack |
@@ -144,7 +144,7 @@ openorb/
 │   └── Config.swift / main.swift
 ├── guest-agent/main.go      guest agent (docker bridge + exec + tcp-forward; linux/arm64)
 ├── cloud-init/              apt-free first-boot provisioning
-├── orb                      the command-line front-end
+├── oorb                      the command-line front-end
 ├── make-image.sh            build disk + seed + cross-compile the agent
 └── orbstack-research.md     deep-dive research report
 ```

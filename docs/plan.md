@@ -17,7 +17,7 @@ filesystem moat last.
 | M2 | zram (kernel-tier efficiency) | ✅ verified |
 | M3 | Active memory ballooning | ✅ verified |
 | M4 | Dev filesystem guidance | ✅ done (docs) |
-| M5 | Networking | 🟡 partial — DNS-following + port-forward verified e2e; `orb route` + full netstack pending |
+| M5 | Networking | 🟡 partial — DNS-following + port-forward verified e2e; `oorb route` + full netstack pending |
 | M6 | Kubernetes (k3s) | ✅ verified — `kubectl get nodes` → Ready in the e2e suite |
 | M7 | Multiple machines | ✅ verified — `machine create`+`exec` green in the e2e suite |
 | M8 | Native menu-bar GUI | ✅ builds & launches (UI not visually verified headless) |
@@ -28,10 +28,10 @@ filesystem moat last.
 A long verification push turned the suite from chaos into a reliable 9/12 and
 root-caused the real reliability bugs (all fixed, see git log):
 
-1. **Binary signing** — `orb` only codesigned the VZ binary when it *built* it;
+1. **Binary signing** — `oorb` only codesigned the VZ binary when it *built* it;
    any rebuild left it unsigned → VZ refused to boot (`VZErrorDomain Code=2`).
    This was the core "VM won't boot" cause. Now `bin()` always re-signs.
-2. **Bash 3.2 array crash** — `orb start` aborted on stock macOS bash whenever
+2. **Bash 3.2 array crash** — `oorb start` aborted on stock macOS bash whenever
    k8s wasn't enabled (empty array under `set -u`). Fixed with the 3.2-safe
    expansion.
 3. **`machine exec`** — ran `docker exec` over the host socket, which loses
@@ -58,7 +58,7 @@ Re-verify from a fresh host state (reboot).
    `flock` on the disk image before boot (`DiskLock`), so two VMs can never write
    the same image at once (the concurrent-writer ext4 corruption that broke later
    boots). Auto-released by the kernel on exit, so a crash leaves no stale lock.
-7. **`orb start` fails fast** — if the engine exits early (locked disk, VZ boot
+7. **`oorb start` fails fast** — if the engine exits early (locked disk, VZ boot
    refusal, …) the wrapper now detects the dead process and prints the real error
    from `vm.log` immediately, instead of polling for 5 minutes and reporting a
    generic timeout.
@@ -73,7 +73,7 @@ feature** — it's that the **foundation isn't rock-solid yet**, and a chunk of 
   force-kills that corrupted the disk, and stuck build processes holding SwiftPM/Go locks that
   cascaded into hangs. OrbStack just-works; openorb still sometimes won't boot. This is the
   most painful practical gap.
-- **Unverified work:** `orb route` (M5), k3s (M6), machines (M7) are code-complete but never
+- **Unverified work:** `oorb route` (M5), k3s (M6), machines (M7) are code-complete but never
   ran end-to-end — and M7 shipped with a real bug that only surfaced when a stale verification
   task finally completed. *Code that hasn't run doesn't count.*
 - **Maturity:** the GUI (M8) is a menu-bar stub; there's no packaging/distribution; the
@@ -82,7 +82,7 @@ feature** — it's that the **foundation isn't rock-solid yet**, and a chunk of 
 The gaps fall into three buckets:
 
 **A. Foundation (stability & trust) — the current top blocker**
-1. Boot/provision reliability: `orb start` must *always* come up, shutdown must never corrupt
+1. Boot/provision reliability: `oorb start` must *always* come up, shutdown must never corrupt
    the disk, no lock cascades.
 2. Prove the written work: real end-to-end green for M5 route, M6 k3s, M7 machines (+ fix bugs).
 3. An automated e2e test suite (start→docker→mount→rosetta→port→k8s→machine→stop), CI-gated, so
@@ -95,7 +95,7 @@ The gaps fall into three buckets:
 
 **C. Product (truly *nice*)**
 6. Full GUI (containers/images/volumes/logs/machines/k8s/settings), not a menu-bar stub.
-7. Networking depth: VPN *traffic* routing (gvproxy), container-by-IP, `*.orb.local` domains.
+7. Networking depth: VPN *traffic* routing (gvproxy), container-by-IP, `*.oorb.local` domains.
 8. Packaging: signed + notarized `.app`, dmg / brew cask, Sparkle auto-update.
 
 ## Path forward — Phase 0 → 1 → 2
@@ -105,7 +105,7 @@ The gaps fall into three buckets:
 
 **Phase 0 — Foundation hardening (do first)**
 - 0.1 Root-cause and fix boot/provision reliability (EFI delay? cloud-init apt stalls? lock
-  contention?); target a stable <10 s start; graceful-only shutdown; `orb start` self-heals.
+  contention?); target a stable <10 s start; graceful-only shutdown; `oorb start` self-heals.
 - 0.2 `make verify` end-to-end suite + CI; red on any failure.
 - 0.3 Verify & harden M5 route / M6 k3s / M7 machines to real green.
 
@@ -139,10 +139,10 @@ VMM). Matching its *reliability and polish* ≈ Phase 0 + Phase 2 (large but ord
 ---
 
 ## M1 — Instant restart (golden image)
-- **Goal:** `orb start` on an already-provisioned disk in **≤ 3 s**; provisioning never reruns.
-- **Tasks:** make `orb build-image` produce a fully-provisioned "golden" disk (boot once, let
-  cloud-init finish, snapshot); `orb start` reuses it read-fast; keep a pristine copy so resets are cheap.
-- **Verify:** `time orb start` ≤ 3 s; `docker run hello-world` immediately after.
+- **Goal:** `oorb start` on an already-provisioned disk in **≤ 3 s**; provisioning never reruns.
+- **Tasks:** make `oorb build-image` produce a fully-provisioned "golden" disk (boot once, let
+  cloud-init finish, snapshot); `oorb start` reuses it read-fast; keep a pristine copy so resets are cheap.
+- **Verify:** `time oorb start` ≤ 3 s; `docker run hello-world` immediately after.
 - **Effort:** 🟢 small · **Risk:** low · **Deps:** none.
 
 ## M2 — Fast boot + custom kernel
@@ -165,7 +165,7 @@ VMM). Matching its *reliability and polish* ≈ Phase 0 + Phase 2 (large but ord
 
 ## M4 — Dev filesystem, pragmatic
 - **Goal:** make mounted-source dev usable now (without the full M9 rewrite).
-- **Tasks:** an `orb` helper + docs for the named-volume workflow (keep `node_modules`/build dirs
+- **Tasks:** an `oorb` helper + docs for the named-volume workflow (keep `node_modules`/build dirs
   on the guest's own disk); investigate any guest-side caching knob; **add small-file + real
   workload (`npm install`) cases to `bench.sh`**.
 - **Verify:** documented workflow gets `npm install` close to native; bench shows the win.
@@ -181,13 +181,13 @@ VMM). Matching its *reliability and polish* ≈ Phase 0 + Phase 2 (large but ord
 ## M6 — Kubernetes
 - **Goal:** one command to a working cluster.
 - **Tasks:** run **k3s** in the guest; project the kube API (vsock tcp-forward → `localhost:6443`);
-  write/merge a kubeconfig; `orb k8s enable/disable`.
+  write/merge a kubeconfig; `oorb k8s enable/disable`.
 - **Verify:** `kubectl get nodes` and a sample deployment from macOS.
 - **Effort:** 🟡 medium · **Risk:** low–medium · **Deps:** M5 nice-to-have (service networking).
 
 ## M7 — Multiple Linux machines
 - **Goal:** OrbStack-style named, multi-distro machines on the shared kernel.
-- **Tasks:** manage multiple rootfs images; `orb machine create/list/delete/exec`; per-machine
+- **Tasks:** manage multiple rootfs images; `oorb machine create/list/delete/exec`; per-machine
   mounts/networking; one SSH/exec multiplexer.
 - **Verify:** create an Ubuntu and an Alpine machine, exec into each, files isolated.
 - **Effort:** 🔴 large · **Risk:** medium · **Deps:** M2 (shared custom kernel helps).

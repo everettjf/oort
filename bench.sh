@@ -6,12 +6,12 @@
 #   - VirtioFS small-file overhead (the FUSE per-call weak spot)
 #   - Docker run latency
 #
-# Filesystem tests run directly in the guest via `orb exec` (Ubuntu's GNU
+# Filesystem tests run directly in the guest via `oorb exec` (Ubuntu's GNU
 # coreutils → accurate rates and nanosecond timing, no container-startup noise).
-# Requires the VM to be started:  ./orb start && ./bench.sh
+# Requires the VM to be started:  ./oorb start && ./bench.sh
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-ORB="$HERE/orb"
+ORB="$HERE/oorb"
 SIZE_MB="${SIZE_MB:-512}"
 SMALL_N="${SMALL_N:-3000}"
 
