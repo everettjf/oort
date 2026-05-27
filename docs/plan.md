@@ -53,6 +53,20 @@ consecutive boots while host load stayed low, pointing at VZ/host-side
 degradation after hours of heavy create/destroy cycling rather than a logic bug.
 Re-verify from a fresh host state (reboot).
 
+**Sharper repro (2026-05-26 run):** a **cold boot from the golden image is fast
+and reliable** — `oorb start` was ready in ~8.8 s and `docker run`, VirtioFS,
+Rosetta, machines, zram, ballooning and DNS-follow all passed. The failures
+cluster on **booting/restarting a *mutated* `disk.img`** (after heavy cycling, or
+the `k8s enable` stop→start on a freshly-k3s-written disk): the guest kernel comes
+up (vsock RSTs the connection) but **dockerd + the guest agent never start**, so
+graceful stop can't ACPI-poweroff and falls back to force-kill. Separately, on one
+golden boot **container egress failed while dockerd's own image *pull* succeeded**
+— i.e. the guest host has internet but the docker0 NAT/MASQUERADE path for
+containers didn't come up, which also blocks port-forward and k3s CNI. Net: cold
+golden boots are trustworthy today; **the unsolved Phase-0 work is reliable
+restart-on-a-written-disk + deterministic docker0 NAT bring-up.** `oorb reset`
+(restore golden) is the reliable recovery.
+
 **Durability fixes since:**
 6. **Disk-level lock** (the named next fix) — the engine now takes an exclusive
    `flock` on the disk image before boot (`DiskLock`), so two VMs can never write
