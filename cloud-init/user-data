@@ -199,6 +199,61 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
+  # Self-heal the intermittent docker0 NAT/egress state. On rare, time-correlated
+  # boots dockerd's nat/MASQUERADE rules are present but container egress doesn't
+  # actually work, while the guest *host* still reaches the internet. The
+  # canonical remedy is to restart dockerd, which tears down and rebuilds its nft
+  # ruleset cleanly. We probe once at boot with a baked-in busybox (no network/pull
+  # needed) using ICMP to 1.1.1.1 (multi-hop, no DNS); only if the container path
+  # is down AND the host path is up do we restart docker — so a genuine outage
+  # never causes pointless churn. Runs once per boot (oneshot), before any user
+  # containers exist, so the restart is harmless.
+  - path: /usr/local/bin/openorb-docker-net-heal.sh
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -u
+      log() { echo "openorb-net-heal: $*"; }
+      ready() { docker info >/dev/null 2>&1; }
+      # bounded wait for dockerd
+      i=0; while [ "$i" -lt 60 ]; do ready && break; i=$((i + 1)); sleep 1; done
+      ready || { log "docker not ready; skipping"; exit 0; }
+      # Probe BOTH raw egress (ICMP) and DNS from a throwaway container — the bad
+      # boots fail at the DNS/TCP layer, not just ICMP, so checking ping alone
+      # would miss them. busybox is baked into the golden (no network/pull needed).
+      probe() {
+        docker run --rm --platform linux/arm64 --network bridge busybox:latest sh -c \
+          'ping -c1 -W4 1.1.1.1 >/dev/null 2>&1 && nslookup example.com 1.1.1.1 >/dev/null 2>&1'
+      }
+      # Retry over ~24s so the normal startup settle (egress is up by ~8s on a good
+      # boot) isn't misjudged as broken — only a sustained failure triggers a heal.
+      ok=n; for _ in 1 2 3 4 5 6 7 8; do probe && { ok=y; break; }; sleep 3; done
+      [ "$ok" = y ] && { log "container egress OK"; exit 0; }
+      # Container egress is down. Only restart if the host itself is online —
+      # otherwise it's a real outage, not the NAT bug, and a restart won't help.
+      if ! ping -c1 -W5 1.1.1.1 >/dev/null 2>&1; then
+        log "host egress also down — real outage, not the NAT bug; skipping restart"
+        exit 0
+      fi
+      log "container egress broken but host is online — restarting dockerd to rebuild NAT rules"
+      systemctl restart docker.service
+      i=0; while [ "$i" -lt 60 ]; do ready && break; i=$((i + 1)); sleep 1; done
+      if probe; then log "egress recovered after docker restart"; else log "egress STILL broken after restart"; fi
+      exit 0
+  - path: /etc/systemd/system/openorb-docker-net-heal.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=openorb: verify + self-heal container egress (docker0 NAT)
+      After=docker.service openorb-guest.service network-online.target
+      Wants=docker.service network-online.target
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/openorb-docker-net-heal.sh
+      RemainAfterExit=yes
+      [Install]
+      WantedBy=multi-user.target
+
 # Bring Docker + the vsock bridge up first, then mount the VirtioFS shares.
 # Mounting is done here (not the cloud-init `mounts` module) so it can never
 # block bring-up; fstab entries are added for later boots.
@@ -220,6 +275,11 @@ runcmd:
   - systemctl enable --now docker.service
   - systemctl enable --now openorb-guest.service
   - systemctl enable --now openorb-rosetta.service || true
+  # Bake a tiny image into the golden so the egress self-heal can probe with no
+  # network/pull on later boots. Cold provisioning egress is reliable, so this
+  # pull is safe here. Then enable the heal oneshot (runs on every boot).
+  - docker pull --platform linux/arm64 busybox:latest >/dev/null 2>&1 || true
+  - systemctl enable openorb-docker-net-heal.service || true
   # The two settings below only affect LATER boots, so run them after Docker +
   # the agent are already up — never let them sit in front of bring-up.
   # IPv6 is disabled project-wide (bootcmd), but cloud-init renders the NIC with
