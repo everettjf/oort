@@ -122,6 +122,23 @@ if [ "${SKIP_K8S:-0}" != 1 ]; then
   fi
 fi
 
+echo "── restart on a mutated disk ─────────────────"
+# The top Phase-0 reliability bug: a clean cold boot works, but restarting after
+# the disk has been written (the create/destroy + k3s churn above) used to fail —
+# a force-killed shutdown corrupted the image so dockerd/the agent never came back.
+# The durable-stop fix (guest agent sync+poweroff, no force-kill) should make this
+# stop→start cycle green every time. We time the stop to confirm it didn't hit the
+# 30s force-kill fallback, then require Docker to come back on the restarted disk.
+t0=$(date +%s)
+"$ORB" stop >/dev/null 2>&1
+check "$([ $(( $(date +%s) - t0 )) -lt 28 ] && echo y || echo n)" "y" "stop powered off cleanly (no force-kill)"
+"$ORB" start >/dev/null 2>&1
+up=n; for _ in $(seq 1 20); do
+  curl -s --max-time 4 --unix-socket "$SOCK" http://localhost/version 2>/dev/null | grep -q ApiVersion && { up=y; break; }
+  sleep 2
+done
+check "$up" "y" "Docker reachable after restart-on-mutated-disk"
+
 echo "==> stop"
 "$ORB" stop >/dev/null 2>&1
 

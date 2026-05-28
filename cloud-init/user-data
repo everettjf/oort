@@ -20,6 +20,9 @@ ssh_pwauth: true
 bootcmd:
   - [ sysctl, -w, net.ipv6.conf.all.disable_ipv6=1 ]
   - [ sysctl, -w, net.ipv6.conf.default.disable_ipv6=1 ]
+  # Enable magic-sysrq now (the drop-in below makes it persist) so the guest
+  # agent's guaranteed-clean poweroff works from the very first boot.
+  - [ sysctl, -w, kernel.sysrq=1 ]
 
 write_files:
   # Cap how long systemd waits on units at shutdown so `oorb stop` powers off
@@ -30,6 +33,22 @@ write_files:
     content: |
       [Manager]
       DefaultTimeoutStopSec=8s
+  # Enable all magic-sysrq functions so the guest agent's guaranteed-clean
+  # poweroff path (sync + remount-ro + power off via /proc/sysrq-trigger) works
+  # even when systemd/dockerd are wedged. This is what lets `oorb stop` avoid the
+  # force-kill that corrupts the disk image.
+  - path: /etc/sysctl.d/99-openorb-sysrq.conf
+    permissions: "0644"
+    content: |
+      kernel.sysrq = 1
+  # Auto-repair a dirty root filesystem at boot instead of dropping to a degraded
+  # state where dockerd/the agent never start. Belongs in the kernel command line;
+  # this GRUB drop-in is baked in by `update-grub` during golden-image provisioning
+  # and recovers a disk that an earlier unclean shutdown left inconsistent.
+  - path: /etc/default/grub.d/99-openorb-fsck.cfg
+    permissions: "0644"
+    content: |
+      GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX fsck.repair=yes"
   # Static Docker engine installer (single tarball from Docker's CDN, IPv4).
   - path: /usr/local/bin/openorb-install-docker.sh
     permissions: "0755"
@@ -166,6 +185,9 @@ runcmd:
   - rm -f /etc/resolv.conf
   - printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\noptions single-request timeout:2 attempts:1\n' > /etc/resolv.conf
   - systemctl daemon-reload
+  # Bake the fsck.repair=yes drop-in (above) into the boot config so a disk left
+  # dirty by an unclean shutdown self-repairs on the next boot. Never fatal.
+  - update-grub 2>/dev/null || true
   # install-docker.sh mounts /mnt/mac, installs the static Docker engine, and
   # stages the openorb-guest binary from the share.
   - /usr/local/bin/openorb-install-docker.sh

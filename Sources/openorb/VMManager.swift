@@ -101,11 +101,40 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
         FileHandle.standardError.write(Data(banner.utf8))
     }
 
+    /// vsock port where the guest agent listens for a clean-poweroff request.
+    /// Must match `shutdownPort` in guest-agent/main.go.
+    private static let guestShutdownPort: UInt32 = 2378
+
     func requestStop() {
         vmQueue.async {
-            guard let vm = self.vm, vm.canRequestStop else { exit(0) }
-            do { try vm.requestStop() } catch { exit(0) }
+            guard let vm = self.vm else { exit(0) }
+            // Preferred path: ask the guest agent to sync the filesystem and power
+            // off cleanly (graceful systemd, sysrq fallback). This guarantees the
+            // disk image is flushed and consistent, so we never need a force-kill —
+            // the force-kill is what corrupted the disk and broke the next boot.
+            if let device = vm.socketDevices.first as? VZVirtioSocketDevice {
+                device.connect(toPort: VMManager.guestShutdownPort) { result in
+                    switch result {
+                    case .success:
+                        // The agent powers off on connect; guestDidStop will fire.
+                        Log.info("requested clean guest poweroff via agent")
+                    case .failure(let err):
+                        // Agent unreachable (e.g. it never came up on a damaged
+                        // disk) — fall back to an ACPI stop request.
+                        Log.warn("agent shutdown port unreachable (\(err.localizedDescription)); falling back to ACPI")
+                        self.acpiStop()
+                    }
+                }
+            } else {
+                self.acpiStop()
+            }
         }
+    }
+
+    /// ACPI graceful-stop request. Must run on `vmQueue`.
+    private func acpiStop() {
+        guard let vm = self.vm, vm.canRequestStop else { exit(0) }
+        do { try vm.requestStop() } catch { exit(0) }
     }
 
     // MARK: - VZVirtualMachineDelegate

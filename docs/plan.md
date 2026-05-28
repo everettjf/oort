@@ -76,6 +76,29 @@ restart-on-a-written-disk + deterministic docker0 NAT bring-up.** `oorb reset`
    refusal, …) the wrapper now detects the dead process and prints the real error
    from `vm.log` immediately, instead of polling for 5 minutes and reporting a
    generic timeout.
+8. **Durable stop — the restart-on-a-mutated-disk fix (2026-05-27, verified).**
+   Root cause was a doom loop: ACPI graceful stop stalled when dockerd/systemd
+   were busy → host timed out and `kill -9`'d the VM mid-write → corrupted the
+   ext4 image → next boot's dockerd + agent never started → stop force-killed
+   again. Broken at the source: the guest agent now serves a **vsock shutdown
+   port (2378)** that `sync`s the fs and does a graceful `systemctl poweroff`
+   with a **sysrq `s`/`u`/`o` fallback** (sync, remount-ro, power off — needs
+   neither systemd nor acpid). `VMManager.requestStop` prefers that path and only
+   falls back to ACPI if the agent is unreachable. cloud-init persists
+   `kernel.sysrq=1` and bakes `fsck.repair=yes` into GRUB so a disk left dirty by
+   any earlier crash self-heals on boot. `tests/e2e.sh` now has a
+   **restart-on-a-mutated-disk** case (stop <28 s = no force-kill, then Docker
+   must come back on the restarted disk) — green; a healthy stop now powers off
+   in ~1 s via the agent.
+
+**Remaining Phase-0 residual — intermittent docker0 NAT bring-up.** The 2026-05-27
+e2e run hit it (container egress/DNS/port-forward red) while dockerd's own pull
+succeeded; a manual reboot immediately after showed MASQUERADE + `ip_forward=1`
+all correct. It's a **boot-ordering race**: `docker.service` (After/Wants
+network-online.target) activates at the same second network-online is reached, so
+dockerd sometimes installs its nft NAT rules before the NIC/route fully settles.
+Next fix: order docker.service strictly after the NIC is up, or add an
+`ExecStartPost` that verifies/re-applies the MASQUERADE rule.
 
 ## Reassessment — the real gap to OrbStack
 

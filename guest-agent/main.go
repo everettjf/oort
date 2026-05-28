@@ -33,10 +33,11 @@ import (
 )
 
 const (
-	dockerPort  = 2375
-	agentPort   = 2376
-	forwardPort = 2377
-	dockerSock  = "/run/docker.sock"
+	dockerPort   = 2375
+	agentPort    = 2376
+	forwardPort  = 2377
+	shutdownPort = 2378
+	dockerSock   = "/run/docker.sock"
 
 	// Bound every exec so a single hung command (a wedged `docker` call, a
 	// process that never exits) can't leak its goroutine + fds + child process
@@ -58,10 +59,11 @@ func main() {
 		_ = unix.Setrlimit(unix.RLIMIT_NOFILE, &lim)
 	}
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(4)
 	go func() { defer wg.Done(); serve(dockerPort, handleDocker) }()
 	go func() { defer wg.Done(); serve(agentPort, handleExec) }()
 	go func() { defer wg.Done(); serve(forwardPort, handleTCPForward) }()
+	go func() { defer wg.Done(); serve(shutdownPort, handleShutdown) }()
 	wg.Wait()
 }
 
@@ -147,6 +149,53 @@ func handleTCPForward(conn *os.File) {
 	conn.Close()
 	dst.Close()
 	<-done
+}
+
+// handleShutdown performs a guaranteed-clean poweroff when the host connects to
+// the shutdown port. Merely accepting the connection is the request — the host's
+// `oorb stop` opens it on SIGINT.
+//
+// Why this exists: the old stop path relied solely on ACPI → systemd → poweroff.
+// When dockerd or systemd were wedged (e.g. on a busy guest), ACPI stalled, the
+// host timed out and force-killed the VM mid-write, which corrupted the ext4
+// image and broke the *next* boot — the "restart-on-a-mutated-disk fails" loop.
+//
+// We break that loop here: first flush the filesystem and try a graceful systemd
+// poweroff (stops containers, unmounts cleanly); if systemd is wedged and we're
+// still alive after a grace window, fall back to the kernel's sysrq triggers
+// (sync, remount-read-only, power off) — a path that needs neither systemd nor
+// acpid, so a hung dockerd can never leave a dirty disk behind.
+func handleShutdown(conn *os.File) {
+	defer conn.Close()
+	unix.Sync() // flush dirty pages to the disk image before anything else
+	conn.Write([]byte("ok\n"))
+
+	// Graceful first: let systemd stop units and unmount cleanly.
+	_ = exec.Command("/bin/systemctl", "--no-block", "poweroff").Run()
+
+	// If systemd actually powers us off, the process dies here and the sysrq
+	// fallback below never runs. The grace window is longer than the unit stop
+	// timeout (DefaultTimeoutStopSec=8s) so a legitimate clean shutdown isn't
+	// cut short — sysrq only fires when systemd is genuinely stuck.
+	time.Sleep(12 * time.Second)
+
+	// Guaranteed path, independent of userspace. Enable all sysrq functions,
+	// then "s"ync, "u"nmount(remount-ro), "o"ff — the safe-reboot sequence.
+	if f, err := os.OpenFile("/proc/sys/kernel/sysrq", os.O_WRONLY, 0); err == nil {
+		f.WriteString("1")
+		f.Close()
+	}
+	sysrq := func(b string) {
+		if f, err := os.OpenFile("/proc/sysrq-trigger", os.O_WRONLY, 0); err == nil {
+			f.WriteString(b)
+			f.Close()
+		}
+	}
+	sysrq("s")
+	time.Sleep(500 * time.Millisecond)
+	sysrq("u")
+	time.Sleep(500 * time.Millisecond)
+	sysrq("o")
 }
 
 // handleExec reads one HTTP request whose body is a shell command, runs it,
