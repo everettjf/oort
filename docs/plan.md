@@ -91,14 +91,36 @@ restart-on-a-written-disk + deterministic docker0 NAT bring-up.** `oorb reset`
    must come back on the restarted disk) — green; a healthy stop now powers off
    in ~1 s via the agent.
 
-**Remaining Phase-0 residual — intermittent docker0 NAT bring-up.** The 2026-05-27
-e2e run hit it (container egress/DNS/port-forward red) while dockerd's own pull
-succeeded; a manual reboot immediately after showed MASQUERADE + `ip_forward=1`
-all correct. It's a **boot-ordering race**: `docker.service` (After/Wants
-network-online.target) activates at the same second network-online is reached, so
-dockerd sometimes installs its nft NAT rules before the NIC/route fully settles.
-Next fix: order docker.service strictly after the NIC is up, or add an
-`ExecStartPost` that verifies/re-applies the MASQUERADE rule.
+9. **Provisioning reliability (2026-05-27).** `oorb build-image` was failing on
+   the provisioning boot (kernel at the login prompt, dockerd + agent dead). Two
+   bugs: (a) the `dhcp6: false` sed line was an unquoted YAML scalar containing
+   `": "`, so cloud-init couldn't parse user-data and skipped ALL provisioning;
+   (b) `update-grub` (os-prober can hang) sat in `runcmd` *before* the docker/agent
+   enables, so a hang left them unstarted. Fix: quote the scalar, move the two
+   next-boot-only tweaks (dhcp6 sed, update-grub) after the enables, cap
+   update-grub with `timeout 60`. Verified: build-image succeeds and 24/24 boot
+   cycles came up with Docker reachable.
+
+10. **Container-egress self-heal (2026-05-27, mitigated — not root-caused).** On
+    rare, **time-clustered** boots a container can't reach the internet/DNS while
+    the guest *host* still can. Deep diag (40+ boots): on a bad boot the route is
+    up, `ip_forward=1`, dockerd's nat/MASQUERADE + FORWARD rules are all present,
+    the container can ping its gateway — yet multi-hop egress is dead and the
+    MASQUERADE counter stays 0, i.e. **rules present but not translating**. Not
+    reproducible on demand (saw 24 good vs 6 bad, bad ones in ~10-min clusters), so
+    no pinpointed root cause. Mitigation: `openorb-docker-net-heal.service` (boot
+    oneshot) probes container egress with a baked-in busybox (ICMP→1.1.1.1, no DNS)
+    and, only if the container path is down while the host is up, restarts dockerd
+    once to rebuild the nft ruleset, then re-probes. Verified harmless on 13 good
+    boots (0 restarts). Also shipped `dhcp6: false` + a route-wait `ExecStartPre`
+    on docker.service (hardening, but they did NOT prevent the bad cluster).
+
+**Remaining Phase-0 open question — root-cause the egress heisenbug.** The
+self-heal recovers the symptom, but the true cause of "dockerd's NAT rules are
+present but don't translate" (and why it time-clusters) is unknown, and the
+restart-docker recovery wasn't observed end-to-end on a live bad boot. Next:
+catch the heal firing (`journalctl -u openorb-docker-net-heal` → "restarting
+dockerd") and confirm it recovers; investigate a host-side (VZ NAT) trigger.
 
 ## Reassessment — the real gap to OrbStack
 
