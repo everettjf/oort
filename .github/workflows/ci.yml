@@ -21,6 +21,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Go isn't preinstalled on the macOS runner image, so set it up explicitly
+      # (the guest agent is Go; `make guest` and `go vet` below need it).
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
       - name: Show toolchain
         run: swift --version && go version
 
