@@ -78,6 +78,21 @@ write_files:
       [ -f /mnt/mac/openorb-guest ] && install -m0755 /mnt/mac/openorb-guest /usr/local/bin/openorb-guest
       echo "openorb: docker ${V} installed"
 
+  # Wait (bounded) for the default route before dockerd installs its container
+  # NAT rules — see docker.service ExecStartPre. Always exits 0 so it can never
+  # block bring-up.
+  - path: /usr/local/bin/openorb-wait-route.sh
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      i=0
+      while [ "$i" -lt 30 ]; do
+        ip route show default 2>/dev/null | grep -q . && break
+        i=$((i + 1))
+        sleep 1
+      done
+      exit 0
+
   # dockerd unit (static binaries bring their own containerd/runc on PATH).
   # The base cloud image ships iptables (nft backend), so let dockerd manage
   # its NAT/MASQUERADE rules — that's what gives containers outbound network.
@@ -89,6 +104,15 @@ write_files:
       After=network-online.target
       Wants=network-online.target
       [Service]
+      # Don't let dockerd install its nat/MASQUERADE + FORWARD rules until the
+      # default route is actually up. network-online.target can fire the same
+      # second the link appears — before routing settles — and dockerd would then
+      # set up container networking against a half-ready stack, leaving container
+      # egress broken for the whole boot (the intermittent docker0 NAT bug). The
+      # wait is in a script file (not inline) so systemd doesn't expand the shell
+      # `$i`; it is bounded to ~30s and always exits 0, so it can never block
+      # bring-up — Restart=always covers the rare case the route never comes.
+      ExecStartPre=/usr/local/bin/openorb-wait-route.sh
       ExecStart=/usr/local/bin/dockerd
       Restart=always
       RestartSec=2
@@ -185,9 +209,6 @@ runcmd:
   - rm -f /etc/resolv.conf
   - printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\noptions single-request timeout:2 attempts:1\n' > /etc/resolv.conf
   - systemctl daemon-reload
-  # Bake the fsck.repair=yes drop-in (above) into the boot config so a disk left
-  # dirty by an unclean shutdown self-repairs on the next boot. Never fatal.
-  - update-grub 2>/dev/null || true
   # install-docker.sh mounts /mnt/mac, installs the static Docker engine, and
   # stages the openorb-guest binary from the share.
   - /usr/local/bin/openorb-install-docker.sh
@@ -199,6 +220,18 @@ runcmd:
   - systemctl enable --now docker.service
   - systemctl enable --now openorb-guest.service
   - systemctl enable --now openorb-rosetta.service || true
+  # The two settings below only affect LATER boots, so run them after Docker +
+  # the agent are already up — never let them sit in front of bring-up.
+  # IPv6 is disabled project-wide (bootcmd), but cloud-init renders the NIC with
+  # dhcp6: true — a contradiction that makes systemd-networkd-wait-online's
+  # "online" timing nondeterministic and feeds the docker0 NAT bring-up race.
+  # Pin it off so network-online means "IPv4 route is up". Persists into golden;
+  # no `netplan apply` here so we don't blip the network mid-provisioning.
+  - "sed -i 's/dhcp6: true/dhcp6: false/' /etc/netplan/*.yaml 2>/dev/null || true"
+  # Bake the fsck.repair=yes drop-in (above) into the boot config so a disk left
+  # dirty by an unclean shutdown self-repairs on the next boot. Time-capped and
+  # never fatal: update-grub runs os-prober, which can hang.
+  - timeout 60 update-grub 2>/dev/null || true
   # Core provisioning is done here — mark ready BEFORE the slow/optional zram step
   # so `oorb start` / build-image never wait on apt (the old reliability sink).
   - touch /run/openorb-ready
