@@ -1,0 +1,266 @@
+// oort-guest: a small, robust guest-side agent compiled to a static
+// linux/arm64 binary (no Python runtime fragility).
+//
+// It serves two virtio-vsock ports:
+//
+//	2375  Docker bridge — splice each connection to /run/docker.sock, so the
+//	      macOS host's `oort` proxy projects the Docker API onto a Unix
+//	      socket. (Replaces the socat/Python forwarder.)
+//	2376  Exec agent    — read an HTTP request whose body is a shell command,
+//	      run it, return combined stdout+stderr. Powers `oort exec` and
+//	      headless diagnostics.
+//
+// Why Go: the earlier Python services were getting killed/wedged under memory
+// pressure and sustained load. A compiled binary with goroutines and io.Copy
+// is far steadier, and closing one side of a tunnel reliably unblocks the other.
+package main
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"golang.org/x/sys/unix"
+)
+
+const (
+	dockerPort   = 2375
+	agentPort    = 2376
+	forwardPort  = 2377
+	shutdownPort = 2378
+	dockerSock   = "/run/docker.sock"
+
+	// Liveness heartbeat: the agent rewrites this file every heartbeatInterval
+	// while healthy; the in-guest watchdog restarts the agent if it goes stale.
+	heartbeatPath     = "/run/oort-agent-heartbeat"
+	heartbeatInterval = 10 * time.Second
+
+	// Bound every exec so a single hung command (a wedged `docker` call, a
+	// process that never exits) can't leak its goroutine + fds + child process
+	// forever. Left unbounded, these accumulate until the process hits its fd
+	// limit, at which point accept() spins and the whole agent goes dark.
+	execTimeout = 110 * time.Second
+	// Cap concurrent execs so a burst can't exhaust fds/PIDs either.
+	maxConcurrentExec = 64
+)
+
+var execSem = make(chan struct{}, maxConcurrentExec)
+
+func main() {
+	// Give plenty of fd headroom: the host opens many short-lived docker/exec
+	// connections, and a transient pile-up must not exhaust the table.
+	var lim unix.Rlimit
+	if unix.Getrlimit(unix.RLIMIT_NOFILE, &lim) == nil {
+		lim.Cur = lim.Max
+		_ = unix.Setrlimit(unix.RLIMIT_NOFILE, &lim)
+	}
+	startHeartbeat() // touch a heartbeat file while healthy; the in-guest watchdog restarts us if it goes stale
+	var wg sync.WaitGroup
+	wg.Add(4)
+	go func() { defer wg.Done(); serve(dockerPort, handleDocker) }()
+	go func() { defer wg.Done(); serve(agentPort, handleExec) }()
+	go func() { defer wg.Done(); serve(forwardPort, handleTCPForward) }()
+	go func() { defer wg.Done(); serve(shutdownPort, handleShutdown) }()
+	wg.Wait()
+}
+
+// startHeartbeat writes a freshness marker every ~10s for as long as the agent
+// is healthy. The in-guest watchdog (a SEPARATE process — so it still runs when
+// the agent is wedged) checks this file's age and restarts oort-guest if it
+// goes stale. This catches the wedge mode we've seen: the process stays alive (so
+// systemd's Restart=always never fires) while its vsock listeners stop serving —
+// typically fd exhaustion. Writing the marker needs an fd, so under fd exhaustion
+// the write fails and the marker goes stale on its own; a hung/deadlocked process
+// can't run this goroutine at all → also goes stale. Either way the watchdog
+// restarts us with a fresh fd table — restarting JUST the agent, not the VM.
+func startHeartbeat() {
+	go func() {
+		for {
+			// WriteFile open+write+close updates mtime; it fails (no update →
+			// goes stale → watchdog restarts us) exactly when we're fd-exhausted.
+			_ = os.WriteFile(heartbeatPath, []byte("ok\n"), 0644)
+			time.Sleep(heartbeatInterval)
+		}
+	}()
+}
+
+// serve listens on a vsock port and hands each accepted fd to handler.
+func serve(port uint32, handler func(*os.File)) {
+	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "vsock socket(%d): %v\n", port, err)
+		return
+	}
+	if err := unix.Bind(fd, &unix.SockaddrVM{CID: unix.VMADDR_CID_ANY, Port: port}); err != nil {
+		fmt.Fprintf(os.Stderr, "vsock bind(%d): %v\n", port, err)
+		unix.Close(fd)
+		return
+	}
+	if err := unix.Listen(fd, 128); err != nil {
+		fmt.Fprintf(os.Stderr, "vsock listen(%d): %v\n", port, err)
+		unix.Close(fd)
+		return
+	}
+	fmt.Printf("oort-guest: listening on vsock:%d\n", port)
+	for {
+		nfd, _, err := unix.Accept(fd)
+		if err != nil {
+			if err == unix.EINTR {
+				continue
+			}
+			// Back off on real errors (notably EMFILE/ENFILE under fd
+			// pressure) instead of busy-looping at 100% CPU — a spin here
+			// starves every handler and makes the agent appear dead.
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		conn := os.NewFile(uintptr(nfd), "vsock")
+		go handler(conn)
+	}
+}
+
+// handleDocker splices a vsock connection to the Docker Unix socket.
+func handleDocker(vconn *os.File) {
+	defer vconn.Close()
+	dconn, err := net.Dial("unix", dockerSock)
+	if err != nil {
+		return
+	}
+	defer dconn.Close()
+	// Copy both ways; when either direction ends, closing both fds unblocks
+	// the other copy — no half-open leaks on keep-alive connections.
+	done := make(chan struct{}, 2)
+	go func() { io.Copy(dconn, vconn); done <- struct{}{} }()
+	go func() { io.Copy(vconn, dconn); done <- struct{}{} }()
+	<-done
+	vconn.Close()
+	dconn.Close()
+	<-done
+}
+
+// handleTCPForward implements Stage 3 port forwarding. The host sends a single
+// line with the target ("8080" or "127.0.0.1:8080"); we dial it inside the guest
+// and splice. This is how a container's published port becomes reachable on the
+// macOS localhost: oort listens on 127.0.0.1:P and tunnels here over vsock.
+func handleTCPForward(conn *os.File) {
+	defer conn.Close()
+	r := bufio.NewReader(conn)
+	line, err := r.ReadString('\n')
+	if err != nil {
+		return
+	}
+	target := strings.TrimSpace(line)
+	if !strings.Contains(target, ":") {
+		target = "127.0.0.1:" + target
+	}
+	dst, err := net.Dial("tcp", target)
+	if err != nil {
+		return
+	}
+	defer dst.Close()
+	done := make(chan struct{}, 2)
+	// r may hold bytes already read past the line; draining r (not conn) preserves them.
+	go func() { io.Copy(dst, r); done <- struct{}{} }()
+	go func() { io.Copy(conn, dst); done <- struct{}{} }()
+	<-done
+	conn.Close()
+	dst.Close()
+	<-done
+}
+
+// handleShutdown performs a guaranteed-clean poweroff when the host connects to
+// the shutdown port. Merely accepting the connection is the request — the host's
+// `oort stop` opens it on SIGINT.
+//
+// Why this exists: the old stop path relied solely on ACPI → systemd → poweroff.
+// When dockerd or systemd were wedged (e.g. on a busy guest), ACPI stalled, the
+// host timed out and force-killed the VM mid-write, which corrupted the ext4
+// image and broke the *next* boot — the "restart-on-a-mutated-disk fails" loop.
+//
+// We break that loop here: first flush the filesystem and try a graceful systemd
+// poweroff (stops containers, unmounts cleanly); if systemd is wedged and we're
+// still alive after a grace window, fall back to the kernel's sysrq triggers
+// (sync, remount-read-only, power off) — a path that needs neither systemd nor
+// acpid, so a hung dockerd can never leave a dirty disk behind.
+func handleShutdown(conn *os.File) {
+	defer conn.Close()
+	unix.Sync() // flush dirty pages to the disk image before anything else
+	conn.Write([]byte("ok\n"))
+
+	// Graceful first: let systemd stop units and unmount cleanly.
+	_ = exec.Command("/bin/systemctl", "--no-block", "poweroff").Run()
+
+	// If systemd actually powers us off, the process dies here and the sysrq
+	// fallback below never runs. The grace window is longer than the unit stop
+	// timeout (DefaultTimeoutStopSec=8s) so a legitimate clean shutdown isn't
+	// cut short — sysrq only fires when systemd is genuinely stuck.
+	time.Sleep(12 * time.Second)
+
+	// Guaranteed path, independent of userspace. Enable all sysrq functions,
+	// then "s"ync, "u"nmount(remount-ro), "o"ff — the safe-reboot sequence.
+	if f, err := os.OpenFile("/proc/sys/kernel/sysrq", os.O_WRONLY, 0); err == nil {
+		f.WriteString("1")
+		f.Close()
+	}
+	sysrq := func(b string) {
+		if f, err := os.OpenFile("/proc/sysrq-trigger", os.O_WRONLY, 0); err == nil {
+			f.WriteString(b)
+			f.Close()
+		}
+	}
+	sysrq("s")
+	time.Sleep(500 * time.Millisecond)
+	sysrq("u")
+	time.Sleep(500 * time.Millisecond)
+	sysrq("o")
+}
+
+// handleExec reads one HTTP request whose body is a shell command, runs it,
+// and writes the combined output back as the response body.
+func handleExec(conn *os.File) {
+	defer conn.Close()
+	req, err := http.ReadRequest(bufio.NewReader(conn))
+	if err != nil {
+		return
+	}
+	body, _ := io.ReadAll(req.Body)
+	cmd := string(body)
+	if cmd == "" {
+		cmd = "echo oort-guest ok"
+	}
+
+	// Limit concurrency so a burst of execs can't exhaust fds/PIDs.
+	execSem <- struct{}{}
+	defer func() { <-execSem }()
+
+	// Run in its own process group and bound it with a timeout, so a hung
+	// command is killed (whole group, including grandchildren) rather than
+	// leaking forever.
+	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
+	defer cancel()
+	c := exec.CommandContext(ctx, "/bin/sh", "-c", cmd)
+	c.SysProcAttr = &unix.SysProcAttr{Setpgid: true}
+	c.Cancel = func() error {
+		if c.Process != nil {
+			// Negative pid → signal the whole process group.
+			_ = unix.Kill(-c.Process.Pid, unix.SIGKILL)
+		}
+		return nil
+	}
+	out, _ := c.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		out = append(out, []byte(fmt.Sprintf("\noort-guest: command timed out after %s\n", execTimeout))...)
+	}
+	fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Length: %s\r\nConnection: close\r\n\r\n",
+		strconv.Itoa(len(out)))
+	conn.Write(out)
+}

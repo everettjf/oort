@@ -1,0 +1,23 @@
+# oort.example.yaml — env-as-code for oort machines.
+#
+# Copy to `oort.yaml` in your project, then:
+#   oort up            # create the machines below and run their setup once
+#   oort down          # tear them down (add --purge to also drop snapshots)
+#
+# Each machine is a named Linux environment on the shared-kernel VM. `setup`
+# commands run once, in order, the first time the machine is created; re-running
+# `oort up` leaves existing machines alone. JSON (oort.json) with the same
+# shape also works.
+
+machines:
+  web:
+    distro: ubuntu
+    setup:
+      - apt-get update -y
+      - apt-get install -y --no-install-recommends git curl ca-certificates
+      - git config --global init.defaultBranch main
+
+  cache:
+    distro: alpine
+    setup:
+      - apk add --no-cache redis

@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Oort — a lightweight OrbStack-style Docker &amp; Linux runtime for macOS</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><circle cx='12' cy='12' r='8.7' fill='none' stroke='%233ee0c5' stroke-width='1.2' stroke-dasharray='1.5 2.3'/><g fill='%233ee0c5'><circle cx='12' cy='12' r='2.3'/><circle cx='12' cy='2.7' r='1.1'/><circle cx='19.6' cy='7.1' r='.9'/><circle cx='21.3' cy='13.7' r='1'/><circle cx='16.5' cy='20.3' r='.85'/><circle cx='9.1' cy='21.3' r='1.1'/><circle cx='3.2' cy='16.1' r='.85'/><circle cx='2.8' cy='8.3' r='1'/><circle cx='7.5' cy='3.2' r='.8'/></g></svg>" />
+<meta name="description" content="oort boots a lightweight Linux VM with Apple's Virtualization.framework, then projects Docker, file sharing, x86 translation and port mapping onto macOS — no Docker Desktop. Built in Swift + Go." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --bg:#06080c;
+    --bg-2:#0a0e15;
+    --surface:#0d1219;
+    --surface-2:#11171f;
+    --line:#1c2530;
+    --line-bright:#28333f;
+    --ink:#e7eef6;
+    --ink-dim:#9fb0c0;
+    --ink-faint:#5f7183;
+    --cyan:#3ee0c5;
+    --cyan-soft:#1d6f63;
+    --amber:#ffb454;
+    --violet:#8a7dff;
+    --radius:14px;
+    --maxw:1120px;
+    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,sans-serif;
+    --display:"Chakra Petch","IBM Plex Sans",sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    background:var(--bg);
+    color:var(--ink);
+    font-family:var(--sans);
+    line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+    overflow-x:hidden;
+  }
+  /* atmospheric background */
+  body::before{
+    content:"";position:fixed;inset:0;z-index:-2;
+    background:
+      radial-gradient(900px 600px at 78% -8%, rgba(62,224,197,.10), transparent 60%),
+      radial-gradient(800px 700px at 12% 8%, rgba(138,125,255,.09), transparent 55%),
+      radial-gradient(1000px 800px at 50% 120%, rgba(255,180,84,.06), transparent 60%),
+      var(--bg);
+  }
+  /* grain */
+  body::after{
+    content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.035;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  a{color:inherit;text-decoration:none}
+  ::selection{background:rgba(62,224,197,.28);color:#fff}
+
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 28px}
+
+  /* ── nav ── */
+  nav{
+    position:sticky;top:0;z-index:50;
+    backdrop-filter:blur(12px);
+    background:linear-gradient(to bottom, rgba(6,8,12,.86), rgba(6,8,12,.5));
+    border-bottom:1px solid var(--line);
+  }
+  .nav-in{display:flex;align-items:center;justify-content:space-between;height:64px}
+  .brand{display:flex;align-items:center;gap:11px;font-family:var(--display);font-weight:700;letter-spacing:.5px;font-size:1.05rem}
+  .brand .mk{width:26px;height:26px;flex:0 0 auto}
+  .brand b{color:var(--cyan)}
+  .nav-links{display:flex;gap:30px;align-items:center;font-size:.86rem;color:var(--ink-dim);font-weight:500}
+  .nav-links a{position:relative;transition:color .2s}
+  .nav-links a:hover{color:var(--ink)}
+  .nav-links a::after{content:"";position:absolute;left:0;bottom:-6px;width:0;height:2px;background:var(--cyan);transition:width .25s}
+  .nav-links a:hover::after{width:100%}
+  .nav-cta{border:1px solid var(--line-bright);padding:8px 16px;border-radius:8px;color:var(--ink)!important;font-family:var(--mono);font-size:.8rem;transition:.2s}
+  .nav-cta:hover{border-color:var(--cyan);box-shadow:0 0 0 1px var(--cyan-soft) inset;background:rgba(62,224,197,.05)}
+  @media(max-width:720px){.nav-links a:not(.nav-cta){display:none}}
+
+  /* ── hero ── */
+  header{position:relative;padding:clamp(70px,11vw,140px) 0 90px;overflow:hidden}
+  .hero{display:grid;grid-template-columns:1.05fr .95fr;gap:50px;align-items:center}
+  @media(max-width:880px){.hero{grid-template-columns:1fr;gap:40px}}
+
+  .tag{
+    display:inline-flex;align-items:center;gap:9px;
+    font-family:var(--mono);font-size:.74rem;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--cyan);border:1px solid var(--line-bright);border-radius:100px;
+    padding:6px 14px;margin-bottom:26px;background:rgba(62,224,197,.04);
+  }
+  .tag .dot{width:7px;height:7px;border-radius:50%;background:var(--cyan);box-shadow:0 0 10px var(--cyan);animation:pulse 2.2s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+
+  h1{
+    font-family:var(--display);font-weight:700;
+    font-size:clamp(2.7rem,6.2vw,4.5rem);line-height:.98;letter-spacing:-.01em;
+    margin-bottom:22px;
+  }
+  h1 .em{
+    background:linear-gradient(100deg,var(--cyan),var(--violet) 75%);
+    -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;
+  }
+  .lead{font-size:1.16rem;color:var(--ink-dim);max-width:34ch;margin-bottom:34px}
+  .lead b{color:var(--ink);font-weight:600}
+
+  .cta-row{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
+  .btn{
+    font-family:var(--mono);font-size:.9rem;font-weight:500;
+    padding:13px 24px;border-radius:10px;display:inline-flex;align-items:center;gap:10px;
+    transition:transform .15s, box-shadow .25s, background .2s;
+  }
+  .btn-primary{background:var(--cyan);color:#04110e;font-weight:600;box-shadow:0 0 0 0 rgba(62,224,197,.5)}
+  .btn-primary:hover{transform:translateY(-2px);box-shadow:0 14px 38px -10px rgba(62,224,197,.6)}
+  .btn-ghost{border:1px solid var(--line-bright);color:var(--ink)}
+  .btn-ghost:hover{border-color:var(--ink-faint);background:var(--surface)}
+
+  .meta-row{display:flex;gap:26px;margin-top:36px;flex-wrap:wrap;font-family:var(--mono);font-size:.78rem;color:var(--ink-faint)}
+  .meta-row span b{color:var(--ink-dim);font-weight:500}
+
+  /* orbital visual */
+  .orbit-stage{position:relative;aspect-ratio:1;max-width:430px;margin:0 auto;width:100%}
+  .ring{position:absolute;inset:0;border:1px solid var(--line-bright);border-radius:50%;}
+  .ring.r2{inset:14%;border-color:#202a35}
+  .ring.r3{inset:30%;border-style:dashed;border-color:#1b242e}
+  .ring.spin{animation:spin 26s linear infinite}
+  .ring.spin-rev{animation:spin 38s linear infinite reverse}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .sat{position:absolute;top:-6px;left:50%;width:12px;height:12px;margin-left:-6px;border-radius:50%;background:var(--cyan);box-shadow:0 0 14px var(--cyan)}
+  .sat.amber{background:var(--amber);box-shadow:0 0 14px var(--amber)}
+  .sat.violet{background:var(--violet);box-shadow:0 0 14px var(--violet)}
+  .core{
+    position:absolute;inset:38%;border-radius:50%;
+    background:radial-gradient(circle at 35% 30%, #14323a, #07151a 70%);
+    border:1px solid var(--cyan-soft);
+    display:grid;place-items:center;
+    box-shadow:0 0 60px -6px rgba(62,224,197,.45), inset 0 0 30px rgba(62,224,197,.18);
+  }
+  .core svg{width:46%;height:46%;opacity:.95}
+  .blip{position:absolute;width:4px;height:4px;border-radius:50%;background:var(--ink-faint)}
+
+  /* ── sections ── */
+  section{padding:clamp(56px,8vw,96px) 0;position:relative}
+  .sec-head{margin-bottom:48px;max-width:60ch}
+  .kicker{font-family:var(--mono);font-size:.76rem;letter-spacing:.18em;text-transform:uppercase;color:var(--cyan);margin-bottom:14px;display:flex;align-items:center;gap:10px}
+  .kicker::before{content:"";width:26px;height:1px;background:var(--cyan)}
+  h2{font-family:var(--display);font-weight:600;font-size:clamp(1.8rem,3.6vw,2.7rem);line-height:1.05;letter-spacing:-.01em}
+  .sec-head p{margin-top:16px;color:var(--ink-dim);font-size:1.05rem}
+  .divider{height:1px;background:linear-gradient(to right,transparent,var(--line),transparent)}
+
+  /* feature grid */
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+  @media(max-width:860px){.grid{grid-template-columns:repeat(2,1fr)}}
+  @media(max-width:560px){.grid{grid-template-columns:1fr}}
+  .card{
+    background:linear-gradient(180deg,var(--surface),var(--bg-2));
+    border:1px solid var(--line);border-radius:var(--radius);padding:24px 22px;
+    position:relative;overflow:hidden;transition:border-color .25s, transform .25s;
+  }
+  .card:hover{border-color:var(--line-bright);transform:translateY(-3px)}
+  .card::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(to right,var(--cyan),transparent);opacity:0;transition:opacity .3s}
+  .card:hover::before{opacity:1}
+  .card .ic{font-size:1.5rem;margin-bottom:14px;display:block}
+  .card h3{font-family:var(--display);font-weight:600;font-size:1.06rem;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+  .card p{font-size:.9rem;color:var(--ink-dim)}
+  .ok{font-family:var(--mono);font-size:.66rem;color:var(--cyan);border:1px solid var(--cyan-soft);border-radius:5px;padding:1px 6px;margin-left:auto}
+
+  /* tutorial */
+  .steps{display:flex;flex-direction:column;gap:22px}
+  .step{display:grid;grid-template-columns:auto 1fr;gap:24px;align-items:start}
+  .step-n{
+    font-family:var(--display);font-weight:700;font-size:1.05rem;
+    width:46px;height:46px;flex:0 0 auto;border-radius:12px;display:grid;place-items:center;
+    color:var(--cyan);border:1px solid var(--cyan-soft);background:rgba(62,224,197,.05);
+  }
+  .step-body{flex:1;min-width:0}
+  .step-body h3{font-family:var(--display);font-weight:600;font-size:1.18rem;margin-bottom:6px}
+  .step-body > p{color:var(--ink-dim);font-size:.95rem;margin-bottom:14px}
+
+  /* terminal */
+  .term{background:#080b10;border:1px solid var(--line-bright);border-radius:12px;overflow:hidden;box-shadow:0 24px 60px -28px rgba(0,0,0,.8)}
+  .term-bar{display:flex;align-items:center;gap:7px;padding:11px 14px;border-bottom:1px solid var(--line);background:var(--surface-2)}
+  .term-bar i{width:11px;height:11px;border-radius:50%;display:inline-block}
+  .term-bar i:nth-child(1){background:#ff5f57}.term-bar i:nth-child(2){background:#febc2e}.term-bar i:nth-child(3){background:#28c840}
+  .term-bar span{margin-left:8px;font-family:var(--mono);font-size:.72rem;color:var(--ink-faint)}
+  .term-bar .copy{margin-left:auto;font-family:var(--mono);font-size:.7rem;color:var(--ink-faint);cursor:pointer;border:1px solid var(--line);border-radius:6px;padding:3px 9px;transition:.2s}
+  .term-bar .copy:hover{color:var(--cyan);border-color:var(--cyan-soft)}
+  pre{font-family:var(--mono);font-size:.86rem;line-height:1.75;padding:18px 18px;overflow-x:auto;color:var(--ink)}
+  pre .c{color:var(--ink-faint)}              /* comment */
+  pre .p{color:var(--cyan);user-select:none}  /* prompt $ */
+  pre .k{color:var(--amber)}                  /* command keyword */
+  pre .s{color:var(--violet)}                 /* string/flag */
+  pre .o{color:var(--ink-dim)}                /* output */
+
+  /* architecture */
+  .arch{display:grid;grid-template-columns:1fr 1fr;gap:34px;align-items:center}
+  @media(max-width:860px){.arch{grid-template-columns:1fr}}
+  .arch-list{display:flex;flex-direction:column;gap:18px}
+  .arch-item{display:flex;gap:15px;align-items:flex-start}
+  .arch-item .n{font-family:var(--mono);color:var(--cyan);font-size:.8rem;border:1px solid var(--cyan-soft);border-radius:6px;padding:3px 8px;flex:0 0 auto}
+  .arch-item h4{font-family:var(--display);font-weight:600;font-size:1rem;margin-bottom:3px}
+  .arch-item p{font-size:.9rem;color:var(--ink-dim)}
+  .arch-diagram{font-family:var(--mono);font-size:.74rem;color:var(--ink-dim);background:#080b10;border:1px solid var(--line);border-radius:12px;padding:22px;line-height:1.7;white-space:pre;overflow-x:auto}
+  .arch-diagram b{color:var(--cyan);font-weight:500}
+  .arch-diagram em{color:var(--amber);font-style:normal}
+
+  /* status callout */
+  .callout{
+    border:1px solid var(--line-bright);border-left:3px solid var(--amber);
+    background:linear-gradient(100deg,rgba(255,180,84,.05),transparent);
+    border-radius:12px;padding:26px 28px;
+  }
+  .callout h3{font-family:var(--display);font-weight:600;font-size:1.15rem;margin-bottom:10px;color:var(--amber)}
+  .callout p{color:var(--ink-dim);font-size:.95rem;margin-bottom:10px}
+  .callout p:last-child{margin-bottom:0}
+  .callout code{font-family:var(--mono);font-size:.85em;background:var(--surface);border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:var(--cyan)}
+
+  /* cta band */
+  .band{text-align:center;border:1px solid var(--line);border-radius:20px;padding:clamp(40px,6vw,70px) 28px;background:radial-gradient(600px 300px at 50% -20%,rgba(62,224,197,.10),transparent),var(--surface)}
+  .band h2{margin-bottom:14px}
+  .band p{color:var(--ink-dim);margin:0 auto 30px;max-width:48ch}
+  .band .cta-row{justify-content:center}
+
+  /* footer */
+  footer{border-top:1px solid var(--line);padding:46px 0;margin-top:40px}
+  .foot-in{display:flex;justify-content:space-between;align-items:center;gap:24px;flex-wrap:wrap}
+  .foot-in .brand{font-size:.95rem}
+  .foot-meta{font-family:var(--mono);font-size:.76rem;color:var(--ink-faint);display:flex;gap:22px;flex-wrap:wrap}
+  .foot-meta a:hover{color:var(--cyan)}
+
+  /* reveal */
+  .reveal{opacity:0;transform:translateY(22px);transition:opacity .7s cubic-bezier(.2,.7,.2,1),transform .7s cubic-bezier(.2,.7,.2,1)}
+  .reveal.in{opacity:1;transform:none}
+  .reveal[data-d="1"]{transition-delay:.08s}.reveal[data-d="2"]{transition-delay:.16s}
+  .reveal[data-d="3"]{transition-delay:.24s}.reveal[data-d="4"]{transition-delay:.32s}
+  @media(prefers-reduced-motion:reduce){.reveal{opacity:1;transform:none;transition:none}.ring.spin,.ring.spin-rev{animation:none}}
+</style>
+</head>
+<body>
+
+<!-- satellite mark reused -->
+<svg width="0" height="0" style="position:absolute"><symbol id="sat-mk" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="3.4"/><path d="M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></symbol><symbol id="oort-mk" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8.7" stroke="currentColor" stroke-width="1.1" stroke-dasharray="1.5 2.3" opacity=".5"/><circle cx="12" cy="12" r="2.2" fill="currentColor"/><g fill="currentColor"><circle cx="12" cy="2.7" r="1.05"/><circle cx="19.6" cy="7.1" r=".85"/><circle cx="21.3" cy="13.7" r="1"/><circle cx="16.5" cy="20.3" r=".8"/><circle cx="9.1" cy="21.3" r="1.05"/><circle cx="3.2" cy="16.1" r=".82"/><circle cx="2.8" cy="8.3" r=".95"/><circle cx="7.5" cy="3.2" r=".78"/><circle cx="15" cy="5.9" r=".5" opacity=".65"/><circle cx="6.4" cy="15.6" r=".5" opacity=".65"/></g></symbol></svg>
+
+<nav>
+  <div class="wrap nav-in">
+    <a class="brand" href="#top"><svg class="mk" style="color:var(--cyan)"><use href="#oort-mk"/></svg>O<b>ort</b></a>
+    <div class="nav-links">
+      <a href="#what">What it is</a>
+      <a href="#tutorial">Tutorial</a>
+      <a href="#architecture">Architecture</a>
+      <a class="nav-cta" href="https://github.com/everettjf/oort" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<header id="top">
+  <div class="wrap hero">
+    <div>
+      <span class="tag reveal"><span class="dot"></span>macOS · Apple Silicon · Swift + Go</span>
+      <h1 class="reveal" data-d="1">Docker &amp; Linux<br/>on macOS, <span class="em">unboxed.</span></h1>
+      <p class="lead reveal" data-d="2">A lightweight, OrbStack-style runtime that boots a Linux VM with Apple's <b>Virtualization.framework</b> — then projects the Docker engine, file sharing, x86 translation and port mapping straight onto macOS. <b>No Docker Desktop.</b></p>
+      <p class="reveal" data-d="2" style="margin-top:14px;color:var(--ink-faint);font-size:.92rem;max-width:48ch">Named for the <b style="color:var(--ink-dim)">Oort cloud</b> — the vast shell of countless small icy bodies at the edge of our solar system. Here: the many lightweight machines &amp; sandboxes orbiting one shared kernel.</p>
+      <div class="cta-row reveal" data-d="3">
+        <a class="btn btn-primary" href="#tutorial">Get started →</a>
+        <a class="btn btn-ghost" href="https://github.com/everettjf/oort" target="_blank" rel="noopener"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.2.8-.5v-1.7c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.3 1 .1-.7.4-1.3.7-1.5-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17.3 4.7 18.3 5 18.3 5c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.6.8.5 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>Star on GitHub</a>
+      </div>
+      <div class="meta-row reveal" data-d="4">
+        <span><b>~8.8&nbsp;s</b> cold start (golden)</span>
+        <span><b>stock</b> docker CLI</span>
+        <span><b>MIT</b> licensed</span>
+      </div>
+    </div>
+
+    <div class="orbit-stage reveal" data-d="2" aria-hidden="true">
+      <div class="ring spin"><i class="sat"></i></div>
+      <div class="ring r2 spin-rev"><i class="sat amber"></i></div>
+      <div class="ring r3 spin"><i class="sat violet"></i></div>
+      <div class="blip" style="top:14%;left:80%"></div>
+      <div class="blip" style="top:82%;left:20%"></div>
+      <div class="blip" style="top:60%;left:90%"></div>
+      <div class="core"><svg style="color:var(--cyan)"><use href="#sat-mk"/></svg></div>
+    </div>
+  </div>
+</header>
+
+<div class="wrap"><div class="divider"></div></div>
+
+<!-- WHAT -->
+<section id="what">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="kicker">What works today</div>
+      <h2>A working clone — verified on real hardware.</h2>
+      <p>oort studies <em>why</em> OrbStack is fast and light, then reimplements the core mechanisms by hand. One command to start; the stock <code style="font-family:var(--mono);color:var(--cyan)">docker</code> CLI just works.</p>
+    </div>
+    <div class="grid">
+      <div class="card reveal"><span class="ic">🐳</span><h3>Docker over vsock <span class="ok">✓</span></h3><p>VZ boots a Linux VM; dockerd is projected onto a macOS Unix socket through virtio-vsock.</p></div>
+      <div class="card reveal" data-d="1"><span class="ic">🌐</span><h3>Networking <span class="ok">✓</span></h3><p>dockerd manages iptables NAT — <code style="font-family:var(--mono)">docker build</code> and runtime egress work; guest follows the Mac's DNS.</p></div>
+      <div class="card reveal" data-d="2"><span class="ic">📁</span><h3>VirtioFS sharing <span class="ok">✓</span></h3><p>Bind-mount Mac directories straight into containers over a VirtioFS share.</p></div>
+      <div class="card reveal"><span class="ic">⚡</span><h3>Rosetta x86-64 <span class="ok">✓</span></h3><p><code style="font-family:var(--mono)">--platform linux/amd64</code> images run via Apple's Rosetta translation.</p></div>
+      <div class="card reveal" data-d="1"><span class="ic">🔌</span><h3>Port mapping <span class="ok">✓</span></h3><p>Published container ports surface on <code style="font-family:var(--mono)">localhost</code> automatically.</p></div>
+      <div class="card reveal" data-d="2"><span class="ic">🪶</span><h3>zram + ballooning <span class="ok">✓</span></h3><p>Kernel-tier memory efficiency: zram swap plus active balloon that returns idle RAM to macOS.</p></div>
+      <div class="card reveal"><span class="ic">☸️</span><h3>Kubernetes (k3s) <span class="ok">✓</span></h3><p>One command runs k3s in the guest and projects the kube API onto localhost:6443.</p></div>
+      <div class="card reveal" data-d="1"><span class="ic">📦</span><h3>Linux machines <span class="ok">✓</span></h3><p>Named, multi-distro environments you shell into — Ubuntu, Alpine, more.</p></div>
+      <div class="card reveal" data-d="2"><span class="ic">🖥️</span><h3>Menu-bar GUI <span class="ok">✓</span></h3><p>A native SwiftUI menu-bar app shows status and starts/stops the engine.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- TUTORIAL -->
+<section id="tutorial" style="background:linear-gradient(180deg,transparent,rgba(13,18,25,.5),transparent)">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="kicker">Quick start</div>
+      <h2>From zero to <code style="font-family:var(--mono);color:var(--cyan)">docker run</code> in four steps.</h2>
+      <p>Requires macOS 13+ on Apple Silicon. The CLI is <code style="font-family:var(--mono);color:var(--cyan)">oort</code> (so it never clashes with OrbStack's own <code style="font-family:var(--mono)">orb</code>).</p>
+    </div>
+
+    <div class="steps">
+      <div class="step reveal">
+        <div class="step-n">1</div>
+        <div class="step-body">
+          <h3>Clone &amp; build the golden image</h3>
+          <p>One-time: build and provision the disk, then snapshot a ready-to-boot "golden" image.</p>
+          <div class="term">
+            <div class="term-bar"><i></i><i></i><i></i><span>zsh — ~/dev</span><span class="copy" data-clip="git clone https://github.com/everettjf/oort
+cd oort
+./oort build-image">copy</span></div>
+<pre><span class="p">$</span> <span class="k">git</span> clone https://github.com/everettjf/oort
+<span class="p">$</span> <span class="k">cd</span> oort
+<span class="p">$</span> ./<span class="k">oort</span> build-image       <span class="c"># provisions once, snapshots golden</span>
+<span class="o">done. 'oort start' is now instant; 'oort reset' restores this snapshot.</span></pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="step reveal">
+        <div class="step-n">2</div>
+        <div class="step-body">
+          <h3>Start the VM</h3>
+          <p>Boots Docker, file sharing, Rosetta and port forwarding. A reused golden disk is ready in seconds.</p>
+          <div class="term">
+            <div class="term-bar"><i></i><i></i><i></i><span>zsh — ~/dev/oort</span><span class="copy" data-clip='./oort start
+eval "$(./oort env)"'>copy</span></div>
+<pre><span class="p">$</span> ./<span class="k">oort</span> start
+<span class="o">starting oort VM…</span>
+<span class="o">waiting for Docker.... ready.</span>
+<span class="p">$</span> <span class="k">eval</span> <span class="s">"$(./oort env)"</span>   <span class="c"># export DOCKER_HOST=unix://~/.oort/docker.sock</span></pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="step reveal">
+        <div class="step-n">3</div>
+        <div class="step-body">
+          <h3>Use the stock Docker CLI</h3>
+          <p>It's just Docker. Run containers, publish ports, even run x86-64 images via Rosetta.</p>
+          <div class="term">
+            <div class="term-bar"><i></i><i></i><i></i><span>zsh — docker</span><span class="copy" data-clip="docker run --rm hello-world
+docker run -p 8080:80 nginx
+docker run --platform linux/amd64 alpine uname -m">copy</span></div>
+<pre><span class="p">$</span> <span class="k">docker</span> run --rm hello-world
+<span class="o">Hello from Docker!</span>
+<span class="p">$</span> <span class="k">docker</span> run -p <span class="s">8080:80</span> nginx        <span class="c"># curl localhost:8080 on the Mac</span>
+<span class="p">$</span> <span class="k">docker</span> run --platform <span class="s">linux/amd64</span> alpine uname -m
+<span class="o">x86_64</span>                                <span class="c"># via Rosetta</span></pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="step reveal">
+        <div class="step-n">4</div>
+        <div class="step-body">
+          <h3>Go further — machines &amp; Kubernetes</h3>
+          <p>Spin up named Linux machines, or bring up a k3s cluster with a single command.</p>
+          <div class="term">
+            <div class="term-bar"><i></i><i></i><i></i><span>zsh — oort</span><span class="copy" data-clip="oort machine create dev ubuntu
+oort machine shell dev
+oort k8s enable
+kubectl get nodes">copy</span></div>
+<pre><span class="p">$</span> <span class="k">oort</span> machine create dev ubuntu   <span class="c"># named Linux machine</span>
+<span class="p">$</span> <span class="k">oort</span> machine shell dev
+<span class="p">$</span> <span class="k">oort</span> k8s enable                  <span class="c"># k3s in the guest</span>
+<span class="p">$</span> <span class="k">kubectl</span> get nodes
+<span class="o">NAME      STATUS   ROLES                  AGE   VERSION</span>
+<span class="o">oort   Ready    control-plane,master   12s   v1.30…</span></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ARCHITECTURE -->
+<section id="architecture">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="kicker">How it works</div>
+      <h2>Two halves: a Swift engine and a Go guest agent.</h2>
+    </div>
+    <div class="arch">
+      <div class="arch-list">
+        <div class="arch-item reveal"><span class="n">VZ</span><div><h4>Swift virtualization engine</h4><p>Builds a <code style="font-family:var(--mono)">VZVirtualMachineConfiguration</code> — virtio-blk root disk, NAT net, vsock, VirtioFS, Rosetta share, memory balloon — and owns the lifecycle on a dedicated VM queue.</p></div></div>
+        <div class="arch-item reveal" data-d="1"><span class="n">↔</span><div><h4>vsock socket projection</h4><p>Each host Unix socket is a tunnel to a guest vsock port: dockerd on 2375, the exec agent on 2376, TCP forwards on 2377.</p></div></div>
+        <div class="arch-item reveal" data-d="2"><span class="n">Go</span><div><h4>Static guest agent</h4><p>A tiny static linux/arm64 binary splices the Docker socket, runs <code style="font-family:var(--mono)">oort exec</code> commands, and forwards published ports — steady under load where Python wasn't.</p></div></div>
+        <div class="arch-item reveal" data-d="3"><span class="n">🔒</span><div><h4>Durability by design</h4><p>An exclusive <code style="font-family:var(--mono)">flock</code> on the disk image stops two VMs corrupting it; graceful-only shutdown; <code style="font-family:var(--mono)">oort reset</code> restores the golden snapshot instantly.</p></div></div>
+      </div>
+      <div class="arch-diagram reveal" data-d="1">  macOS host                  Linux guest (VZ)
+┌───────────────────┐       ┌───────────────────────┐
+│  docker CLI / <b>oort</b>  │       │  <b>oort-guest</b> (Go)     │
+│        │          │       │     │                 │
+│   DOCKER_HOST      │ vsock │  2375 → /run/docker.sock│
+│   unix socket  ────┼───────┼──▶  2376 → <em>oort exec</em>     │
+│        │          │       │  2377 → port forward   │
+│   <b>oort</b> (Swift/VZ) │       │     │                 │
+│   • disk • NAT     │       │  dockerd · containerd  │
+│   • VirtioFS       │ virtiofs  /mnt/mac · Rosetta  │
+│   • Rosetta share ─┼───────┼──▶  binfmt_misc         │
+└───────────────────┘       └───────────────────────┘</div>
+    </div>
+  </div>
+</section>
+
+<!-- STATUS -->
+<section style="padding-top:0">
+  <div class="wrap">
+    <div class="callout reveal">
+      <h3>◇ Honest status</h3>
+      <p>A cold boot from the golden image is <b>fast and reliable</b> (~8.8&nbsp;s), and Docker, VirtioFS, Rosetta, machines, zram, ballooning and DNS-follow are verified end-to-end. oort is a study project, not a Docker Desktop replacement for production.</p>
+      <p>Known residual: <b>restarting a heavily-mutated disk</b> can occasionally leave the guest services down — <code>oort reset</code> restores the golden image as a reliable recovery. The remaining moat (OrbStack-class cold start and native-speed bind mounts) is the deliberately-deferred hard work. See the <a href="https://github.com/everettjf/oort/blob/main/docs/plan.md" target="_blank" rel="noopener" style="color:var(--cyan)">plan</a> for the full roadmap.</p>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<section style="padding-top:10px">
+  <div class="wrap">
+    <div class="band reveal">
+      <div class="kicker" style="justify-content:center">Open source · MIT</div>
+      <h2>Boot Linux. Run Docker. Stay light.</h2>
+      <p>Clone the repo, build the golden image, and you're one <code style="font-family:var(--mono);color:var(--cyan)">oort start</code> away.</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="https://github.com/everettjf/oort" target="_blank" rel="noopener">Open on GitHub →</a>
+        <a class="btn btn-ghost" href="https://github.com/everettjf/oort/blob/main/docs/quickstart.md" target="_blank" rel="noopener">Read the docs</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot-in">
+    <a class="brand" href="#top"><svg class="mk" style="color:var(--cyan)"><use href="#oort-mk"/></svg>O<b>ort</b></a>
+    <div class="foot-meta">
+      <span>Built with Swift + Go · Virtualization.framework</span>
+      <a href="https://github.com/everettjf/oort" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/everettjf/oort/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  // staggered reveals
+  const io = new IntersectionObserver((entries)=>{
+    entries.forEach(e=>{ if(e.isIntersecting){ e.target.classList.add('in'); io.unobserve(e.target); } });
+  },{threshold:.12});
+  document.querySelectorAll('.reveal').forEach(el=>io.observe(el));
+
+  // copy buttons
+  document.querySelectorAll('.copy').forEach(btn=>{
+    btn.addEventListener('click',async()=>{
+      try{ await navigator.clipboard.writeText(btn.dataset.clip); const t=btn.textContent; btn.textContent='copied ✓'; setTimeout(()=>btn.textContent=t,1400);}catch(e){}
+    });
+  });
+</script>
+</body>
+</html>

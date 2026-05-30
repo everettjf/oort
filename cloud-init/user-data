@@ -1,0 +1,510 @@
+#cloud-config
+# First-boot provisioning for the oort guest — APT-FREE on purpose.
+#
+# Distro package mirrors (ports.ubuntu.com) proved slow/flaky, and OrbStack
+# itself ships its own Docker tooling rather than apt-installing it. So we:
+#   - disable IPv6 (the VZ NAT resolver returns IPv6-only mirror addresses
+#     while the guest is IPv4-only, which stalls every download)
+#   - install the static Docker engine straight from download.docker.com
+#   - bridge dockerd onto vsock:2375 with a tiny Python forwarder (no socat)
+#   - mount the VirtioFS shares and register Rosetta for x86-64 (Stage 2)
+# Everything here uses only what the base Ubuntu cloud image already provides
+# (python3, curl, tar), so there is no dependency on apt at boot time.
+
+password: oort
+chpasswd:
+  expire: false
+ssh_pwauth: true
+
+# Disable IPv6 early so all name resolution / downloads go over IPv4.
+bootcmd:
+  - [ sysctl, -w, net.ipv6.conf.all.disable_ipv6=1 ]
+  - [ sysctl, -w, net.ipv6.conf.default.disable_ipv6=1 ]
+  # Enable magic-sysrq now (the drop-in below makes it persist) so the guest
+  # agent's guaranteed-clean poweroff works from the very first boot.
+  - [ sysctl, -w, kernel.sysrq=1 ]
+
+write_files:
+  # Cap how long systemd waits on units at shutdown so `oort stop` powers off
+  # quickly and cleanly (a slow docker/unmount can otherwise hang shutdown for
+  # 90s+, forcing a kill that corrupts the disk and breaks the next boot).
+  - path: /etc/systemd/system.conf.d/10-oort.conf
+    permissions: "0644"
+    content: |
+      [Manager]
+      DefaultTimeoutStopSec=8s
+  # Enable all magic-sysrq functions so the guest agent's guaranteed-clean
+  # poweroff path (sync + remount-ro + power off via /proc/sysrq-trigger) works
+  # even when systemd/dockerd are wedged. This is what lets `oort stop` avoid the
+  # force-kill that corrupts the disk image.
+  - path: /etc/sysctl.d/99-oort-sysrq.conf
+    permissions: "0644"
+    content: |
+      kernel.sysrq = 1
+  # Auto-repair a dirty root filesystem at boot instead of dropping to a degraded
+  # state where dockerd/the agent never start. Belongs in the kernel command line;
+  # this GRUB drop-in is baked in by `update-grub` during golden-image provisioning
+  # and recovers a disk that an earlier unclean shutdown left inconsistent.
+  - path: /etc/default/grub.d/99-oort-fsck.cfg
+    permissions: "0644"
+    content: |
+      GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX fsck.repair=yes"
+  # Static Docker engine installer (single tarball from Docker's CDN, IPv4).
+  - path: /usr/local/bin/oort-install-docker.sh
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -e
+      V=27.3.1
+      [ -x /usr/local/bin/dockerd ] && exit 0
+      cd /tmp
+      # Prefer a tarball staged on the VirtioFS share (host-downloaded, reliable);
+      # fall back to Docker's CDN over IPv4 if it isn't there.
+      if [ -f "/mnt/mac/docker-${V}.tgz" ]; then
+        cp "/mnt/mac/docker-${V}.tgz" docker.tgz
+      else
+        mountpoint -q /mnt/mac || { mkdir -p /mnt/mac; mount -t virtiofs mac /mnt/mac || true; }
+        if [ -f "/mnt/mac/docker-${V}.tgz" ]; then
+          cp "/mnt/mac/docker-${V}.tgz" docker.tgz
+        else
+          curl --ipv4 -fL --retry 3 --connect-timeout 15 --max-time 300 \
+            -o docker.tgz "https://download.docker.com/linux/static/stable/aarch64/docker-${V}.tgz"
+        fi
+      fi
+      tar xzf docker.tgz
+      install -m0755 docker/* /usr/local/bin/
+      rm -rf docker docker.tgz
+      # Stage the compiled guest agent from the share.
+      [ -f /mnt/mac/oort-guest ] && install -m0755 /mnt/mac/oort-guest /usr/local/bin/oort-guest
+      echo "oort: docker ${V} installed"
+
+  # Wait (bounded) for the default route before dockerd installs its container
+  # NAT rules — see docker.service ExecStartPre. Always exits 0 so it can never
+  # block bring-up.
+  - path: /usr/local/bin/oort-wait-route.sh
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      # Poll at 0.2s granularity (was 1s) so dockerd starts the instant the route
+      # is up rather than rounding up to a full second — ~0.5-0.8s off boot. Same
+      # ~30s ceiling (150 × 0.2s).
+      i=0
+      while [ "$i" -lt 150 ]; do
+        ip route show default 2>/dev/null | grep -q . && break
+        i=$((i + 1))
+        sleep 0.2
+      done
+      exit 0
+
+  # containerd as its own early unit, so it's READY before dockerd starts —
+  # dockerd then skips "starting managed containerd" (~1s on the boot critical
+  # path) and connects to the running socket. containerd needs no network, so it
+  # comes up in parallel with everything else.
+  - path: /etc/systemd/system/containerd.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=oort containerd
+      [Service]
+      ExecStart=/usr/local/bin/containerd
+      Restart=always
+      RestartSec=2
+      Delegate=yes
+      KillMode=process
+      OOMScoreAdjust=-500
+      LimitNOFILE=1048576
+      [Install]
+      WantedBy=multi-user.target
+
+  # dockerd unit (static binaries bring their own containerd/runc on PATH).
+  # The base cloud image ships iptables (nft backend), so let dockerd manage
+  # its NAT/MASQUERADE rules — that's what gives containers outbound network.
+  - path: /etc/systemd/system/docker.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=oort Docker Engine (static)
+      # Order after basic networking, but DON'T block on network-online.target —
+      # that pulls in systemd-networkd-wait-online (~2s on every boot). dockerd's
+      # own ExecStartPre (oort-wait-route.sh) already waits, briefly, for the
+      # default route before it installs its NAT rules, so this is both faster and
+      # still race-safe. Use the pre-started containerd to skip managed-containerd.
+      After=network.target containerd.service
+      Wants=containerd.service
+      [Service]
+      # Don't let dockerd install its nat/MASQUERADE + FORWARD rules until the
+      # default route is actually up. network-online.target can fire the same
+      # second the link appears — before routing settles — and dockerd would then
+      # set up container networking against a half-ready stack, leaving container
+      # egress broken for the whole boot (the intermittent docker0 NAT bug). The
+      # wait is in a script file (not inline) so systemd doesn't expand the shell
+      # `$i`; it is bounded to ~30s and always exits 0, so it can never block
+      # bring-up — Restart=always covers the rare case the route never comes.
+      ExecStartPre=/usr/local/bin/oort-wait-route.sh
+      ExecStart=/usr/local/bin/dockerd --containerd=/run/containerd/containerd.sock
+      Restart=always
+      RestartSec=2
+      Delegate=yes
+      [Install]
+      WantedBy=multi-user.target
+
+  # oort-guest: one compiled Go binary (staged on the share) that serves
+  # both the Docker vsock bridge (2375 -> /run/docker.sock) and the exec agent
+  # (2376). Replaces the earlier Python services, which were fragile under load.
+  - path: /etc/systemd/system/oort-guest.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=oort guest agent (docker vsock bridge + exec)
+      # Start in PARALLEL with docker, not after it: the agent's docker bridge
+      # redials /run/docker.sock per connection, so it works the moment dockerd is
+      # up regardless of order — and starting early means the host's control
+      # channel + exec are ready ~1s sooner instead of serialized behind docker.
+      After=network.target
+      Wants=docker.service
+      # Never give up restarting the host's lifeline (a rapid restart burst must
+      # not trip the start limiter and leave the agent dead — seen during a wedge).
+      StartLimitIntervalSec=0
+      [Service]
+      ExecStart=/usr/local/bin/oort-guest
+      Restart=always
+      RestartSec=1
+      # Keep the host's lifeline to dockerd alive under memory pressure.
+      OOMScoreAdjust=-900
+      [Install]
+      WantedBy=multi-user.target
+      # An agent that WEDGES (alive but not serving — all vsock ports reset, a
+      # state Restart=always can't catch) is recovered by oort-watchdog.sh,
+      # which restarts this service when the agent's heartbeat file goes stale.
+
+  # zram swap (Stage 4): compressed RAM-backed swap, like OrbStack's. Lets the
+  # guest reclaim memory under pressure instead of OOM-killing.
+  - path: /usr/local/bin/oort-zram.sh
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      # Best-effort, fully bounded: NEVER block boot/provisioning. zram may be BUILT
+      # IN (custom kernel, =y) or a MODULE we install (stock cloud kernel). Either
+      # way we end up with /dev/zram0 and turn it into swap. Marker lets build-image
+      # wait a bounded time.
+      modprobe zram 2>/dev/null || true   # no-op if built in
+      if [ ! -e /sys/class/zram-control ]; then
+        # not built in and not loadable yet → fetch the module (stock kernel path)
+        timeout 120 sh -c 'DEBIAN_FRONTEND=noninteractive apt-get update -o Acquire::http::Timeout=15 >/dev/null 2>&1; \
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends linux-modules-extra-$(uname -r) >/dev/null 2>&1' || true
+        modprobe zram 2>/dev/null || true
+      fi
+      [ -e /sys/class/zram-control ] || { touch /run/oort-zram-done; exit 0; }
+      # Built-in zram creates no device on its own; add one via the control node
+      # (the module path already auto-created zram0, so this is a no-op there).
+      [ -e /dev/zram0 ] || cat /sys/class/zram-control/hot_add >/dev/null 2>&1 || true
+      if [ -e /dev/zram0 ] && ! swapon --show=NAME --noheadings 2>/dev/null | grep -q zram0; then
+        echo lz4 > /sys/block/zram0/comp_algorithm 2>/dev/null || true
+        MEM_KB=$(awk '/MemTotal/{print $2}' /proc/meminfo)
+        echo "$((MEM_KB / 2))K" > /sys/block/zram0/disksize
+        mkswap /dev/zram0 >/dev/null 2>&1
+        swapon -p 100 /dev/zram0 && echo "oort: zram swap on ($((MEM_KB / 2)) KB)"
+      fi
+      touch /run/oort-zram-done
+  - path: /etc/systemd/system/oort-zram.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=oort zram swap
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/oort-zram.sh
+      RemainAfterExit=yes
+      [Install]
+      WantedBy=multi-user.target
+
+  # Register Rosetta with binfmt_misc so x86-64 ELF (incl. amd64 containers)
+  # is translated. printf %s writes the literal \xHH magic; the kernel decodes
+  # it. The "F" flag opens the interpreter at registration time, so it works
+  # across the mount namespaces Docker containers run in.
+  - path: /usr/local/bin/oort-rosetta.sh
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -e
+      grep -qs binfmt_misc /proc/mounts || mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
+      [ -e /mnt/rosetta/rosetta ] || { echo "rosetta share not mounted; skipping"; exit 0; }
+      [ -e /proc/sys/fs/binfmt_misc/rosetta ] && exit 0
+      printf '%s' ':rosetta:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/mnt/rosetta/rosetta:F' > /proc/sys/fs/binfmt_misc/register
+      echo "rosetta binfmt registered"
+  - path: /etc/systemd/system/oort-rosetta.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=oort: register Rosetta binfmt_misc
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/oort-rosetta.sh
+      RemainAfterExit=yes
+      [Install]
+      WantedBy=multi-user.target
+
+  # Self-heal the intermittent docker0 NAT/egress state. On rare, time-correlated
+  # boots dockerd's nat/MASQUERADE rules are present but container egress doesn't
+  # actually work, while the guest *host* still reaches the internet. The
+  # canonical remedy is to restart dockerd, which tears down and rebuilds its nft
+  # ruleset cleanly. We probe once at boot with a baked-in busybox (no network/pull
+  # needed) using ICMP to 1.1.1.1 (multi-hop, no DNS); only if the container path
+  # is down AND the host path is up do we restart docker — so a genuine outage
+  # never causes pointless churn. Runs once per boot (oneshot), before any user
+  # containers exist, so the restart is harmless.
+  - path: /usr/local/bin/oort-docker-net-heal.sh
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -u
+      log() { echo "oort-net-heal: $*"; }
+      ready() { docker info >/dev/null 2>&1; }
+      # bounded wait for dockerd
+      i=0; while [ "$i" -lt 60 ]; do ready && break; i=$((i + 1)); sleep 1; done
+      ready || { log "docker not ready; skipping"; exit 0; }
+      # Probe BOTH raw egress (ICMP) and DNS from a throwaway container — the bad
+      # boots fail at the DNS/TCP layer, not just ICMP, so checking ping alone
+      # would miss them. busybox is baked into the golden (no network/pull needed).
+      probe() {
+        docker run --rm --platform linux/arm64 --network bridge busybox:latest sh -c \
+          'ping -c1 -W4 1.1.1.1 >/dev/null 2>&1 && nslookup example.com 1.1.1.1 >/dev/null 2>&1'
+      }
+      # Retry over ~24s so the normal startup settle (egress is up by ~8s on a good
+      # boot) isn't misjudged as broken — only a sustained failure triggers a heal.
+      ok=n; for _ in 1 2 3 4 5 6 7 8; do probe && { ok=y; break; }; sleep 3; done
+      [ "$ok" = y ] && { log "container egress OK"; exit 0; }
+      # Container egress is down. Only restart if the host itself is online —
+      # otherwise it's a real outage, not the NAT bug, and a restart won't help.
+      if ! ping -c1 -W5 1.1.1.1 >/dev/null 2>&1; then
+        log "host egress also down — real outage, not the NAT bug; skipping restart"
+        exit 0
+      fi
+      log "container egress broken but host is online — restarting dockerd to rebuild NAT rules"
+      systemctl restart docker.service
+      i=0; while [ "$i" -lt 60 ]; do ready && break; i=$((i + 1)); sleep 1; done
+      if probe; then log "egress recovered after docker restart"; else log "egress STILL broken after restart"; fi
+      exit 0
+  - path: /etc/systemd/system/oort-docker-net-heal.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=oort: verify + self-heal container egress (docker0 NAT)
+      After=docker.service oort-guest.service network-online.target
+      Wants=docker.service network-online.target
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/oort-docker-net-heal.sh
+      RemainAfterExit=yes
+      [Install]
+      WantedBy=multi-user.target
+
+  # Liveness watchdog (periodic, every ~30s). Under load, dockerd/containerd can
+  # WEDGE — the process stays alive (so systemd's Restart=always never fires) but
+  # stops answering: the guest agent's vsock docker bridge (2375) resets and
+  # `docker info` hangs. Observed during the first image pull and back-to-back
+  # container creates. The remedy is the same as the net-heal's: restart docker so
+  # dockerd+containerd are rebuilt, and bounce the guest agent so its bridge
+  # reconnects. We act ONLY on a sustained failure: `docker info` is cheap and
+  # still answers during a legitimate build/pull, so a few seconds of timeouts
+  # means genuinely wedged, not merely busy — this is what keeps the watchdog from
+  # ever killing live work.
+  - path: /usr/local/bin/oort-watchdog.sh
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -u
+      log() { echo "oort-watchdog: $*"; }
+
+      # (1) Guest-agent liveness. oort-guest rewrites /run/oort-agent-heartbeat
+      # every ~10s while healthy; if it goes stale the agent has WEDGED (hung or
+      # fd-exhausted — all vsock ports reset, which systemd Restart=always can't
+      # catch since the process is still alive). Restart JUST the agent. Skipped
+      # while the file is absent (agent still starting / pre-heartbeat build).
+      HB=/run/oort-agent-heartbeat
+      if [ -f "$HB" ]; then
+        age=$(( $(date +%s) - $(stat -c %Y "$HB" 2>/dev/null || date +%s) ))
+        if [ "$age" -gt 60 ]; then
+          log "agent heartbeat stale (${age}s) — restarting oort-guest"
+          systemctl restart oort-guest.service
+        fi
+      fi
+
+      # (2) dockerd liveness. Only supervise a daemon systemd considers up; if it's
+      # still starting or was intentionally stopped, leave it to systemd/runcmd.
+      state="$(systemctl is-active docker.service 2>/dev/null || true)"
+      case "$state" in activating|inactive|"") exit 0 ;; esac
+      # Probe dockerd liveness over its own socket with curl — a tiny C binary,
+      # far lighter and steadier under memory pressure than spawning the docker Go
+      # CLI three times (which was crashing under the wedge). /_ping answers
+      # instantly on a healthy daemon and even during a build/pull, so 3 sustained
+      # failures (~10s + timeouts) means genuinely wedged, not merely busy.
+      probe() { curl -s --max-time 5 --unix-socket /run/docker.sock http://localhost/_ping 2>/dev/null | grep -q OK; }
+      ok=n
+      for _ in 1 2 3; do probe && { ok=y; break; }; sleep 5; done
+      [ "$ok" = y ] && exit 0
+      log "dockerd active but unresponsive (/_ping failed 3x) — restarting docker.service"
+      systemctl restart docker.service
+      # Deliberately do NOT restart oort-guest: its vsock->/run/docker.sock
+      # bridge redials per connection, so it recovers on its own once dockerd is
+      # back. Bouncing it would needlessly drop the host's control channel.
+      i=0
+      while [ "$i" -lt 30 ]; do
+        probe && { log "recovered after restart"; exit 0; }
+        i=$((i + 1)); sleep 1
+      done
+      log "STILL unresponsive after restart"
+      exit 0
+  - path: /etc/systemd/system/oort-watchdog.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=oort: liveness watchdog (restart a wedged dockerd or guest agent)
+      After=docker.service oort-guest.service
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/oort-watchdog.sh
+  - path: /etc/systemd/system/oort-watchdog.timer
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=oort: run the liveness watchdog periodically
+      [Timer]
+      # Let boot settle (after net-heal) before the first check, then every 30s.
+      OnBootSec=90
+      OnUnitActiveSec=30
+      AccuracySec=5s
+      [Install]
+      WantedBy=timers.target
+
+  # PERIODIC container-egress self-heal. The boot-time net-heal above is a oneshot
+  # and can't catch egress that degrades LATER — observed: net-heal logged "egress
+  # OK" at boot, then container TCP/DNS egress broke minutes later and nothing
+  # re-checked. This timer re-probes and restarts docker to rebuild the docker0 NAT
+  # when container egress is broken — but ONLY after a SUSTAINED window (2 ticks)
+  # while the guest host is still online, and ONLY when containers are actually
+  # running. A docker restart kills running containers, so we never do it for a
+  # brief self-recovering blip — only for a genuinely stuck bad window.
+  - path: /usr/local/bin/oort-egress-heal.sh
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -u
+      STATE=/run/oort-egress-fails
+      THRESH=2
+      log() { echo "oort-egress-heal: $*"; }
+      # Need a responsive dockerd; a wedged daemon is the watchdog's job.
+      docker info >/dev/null 2>&1 || exit 0
+      # Only probe when containers are actually running — an idle machine needs no
+      # egress, so don't spawn a probe (keeps it completely quiet when unused).
+      [ -n "$(docker ps -q 2>/dev/null)" ] || { rm -f "$STATE" 2>/dev/null; exit 0; }
+      # TCP+DNS probe (NOT icmp-only: in a bad window container ICMP passes while
+      # TCP/DNS die). busybox is baked into the golden; http keeps it light.
+      probe() {
+        docker run --rm --platform linux/arm64 --network bridge busybox:latest \
+          wget -T6 -qO- http://example.com >/dev/null 2>&1
+      }
+      if probe; then rm -f "$STATE" 2>/dev/null; exit 0; fi
+      # A miss. Count consecutive misses across ticks; only heal on a sustained run.
+      n=$(( $(cat "$STATE" 2>/dev/null || echo 0) + 1 ))
+      echo "$n" > "$STATE"
+      log "container egress probe failed ($n/$THRESH)"
+      [ "$n" -lt "$THRESH" ] && exit 0
+      # Sustained failure. Skip if the HOST is offline too (real outage, not the bug).
+      if ! ping -c1 -W4 1.1.1.1 >/dev/null 2>&1; then
+        log "host egress also down — real outage, not the NAT bug; skipping restart"
+        exit 0
+      fi
+      log "container egress broken for $n ticks while host online — restarting docker to rebuild NAT"
+      systemctl restart docker.service
+      rm -f "$STATE" 2>/dev/null
+  - path: /etc/systemd/system/oort-egress-heal.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=oort: periodic container-egress self-heal (rebuild docker0 NAT)
+      After=docker.service
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/oort-egress-heal.sh
+  - path: /etc/systemd/system/oort-egress-heal.timer
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=oort: run the container-egress self-heal periodically
+      [Timer]
+      # Start after boot net-heal has had its say; then probe every 60s. With
+      # THRESH=2 that's ~2 min of sustained breakage before a (disruptive) restart.
+      OnBootSec=120
+      OnUnitActiveSec=60
+      AccuracySec=10s
+      [Install]
+      WantedBy=timers.target
+
+# Bring Docker + the vsock bridge up first, then mount the VirtioFS shares.
+# Mounting is done here (not the cloud-init `mounts` module) so it can never
+# block bring-up; fstab entries are added for later boots.
+runcmd:
+  # Use a static IPv4 resolver. Disabling IPv6 (above) upsets systemd-resolved's
+  # stub at 127.0.0.53; bypass it so Docker image pulls resolve reliably.
+  - systemctl disable --now systemd-resolved 2>/dev/null || true
+  - rm -f /etc/resolv.conf
+  - printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\noptions single-request timeout:2 attempts:1\n' > /etc/resolv.conf
+  - systemctl daemon-reload
+  # flash-kernel (Ubuntu arm64 embedded-boot helper) fails under VZ ("Unsupported
+  # platform ''"), which breaks initramfs regeneration and leaves dpkg half-
+  # configured on ANY package that triggers it (it was silently failing the zram
+  # module install). oort direct-kernel-boots, so flash-kernel is useless here —
+  # neuter it so apt stays healthy (needed by the zram step and `oort build-kernel`).
+  - dpkg-divert --local --rename --add /usr/sbin/flash-kernel 2>/dev/null || true
+  - ln -sf /bin/true /usr/sbin/flash-kernel
+  # install-docker.sh mounts /mnt/mac, installs the static Docker engine, and
+  # stages the oort-guest binary from the share.
+  - /usr/local/bin/oort-install-docker.sh
+  - mkdir -p /mnt/mac /mnt/rosetta
+  - mount -t virtiofs mac /mnt/mac || true
+  - mount -t virtiofs rosetta /mnt/rosetta || true
+  - grep -q '/mnt/mac' /etc/fstab || echo 'mac /mnt/mac virtiofs rw,nofail 0 0' >> /etc/fstab
+  - grep -q '/mnt/rosetta' /etc/fstab || echo 'rosetta /mnt/rosetta virtiofs ro,nofail 0 0' >> /etc/fstab
+  - systemctl enable --now containerd.service
+  - systemctl enable --now docker.service
+  - systemctl enable --now oort-guest.service
+  - systemctl enable --now oort-rosetta.service || true
+  # Bake a tiny image into the golden so the egress self-heal can probe with no
+  # network/pull on later boots. Cold provisioning egress is reliable, so this
+  # pull is safe here. Then enable the heal oneshot (runs on every boot).
+  - docker pull --platform linux/arm64 busybox:latest >/dev/null 2>&1 || true
+  - systemctl enable oort-docker-net-heal.service || true
+  # Liveness watchdog: periodic timer that restarts a wedged dockerd (a state
+  # Restart=always can't catch). enable --now so it also runs this session.
+  - systemctl enable --now oort-watchdog.timer || true
+  # Periodic container-egress self-heal (complements the boot-only net-heal).
+  - systemctl enable --now oort-egress-heal.timer || true
+  # The two settings below only affect LATER boots, so run them after Docker +
+  # the agent are already up — never let them sit in front of bring-up.
+  # IPv6 is disabled project-wide (bootcmd), but cloud-init renders the NIC with
+  # dhcp6: true — a contradiction that makes systemd-networkd-wait-online's
+  # "online" timing nondeterministic and feeds the docker0 NAT bring-up race.
+  # Pin it off so network-online means "IPv4 route is up". Persists into golden;
+  # no `netplan apply` here so we don't blip the network mid-provisioning.
+  - "sed -i 's/dhcp6: true/dhcp6: false/' /etc/netplan/*.yaml 2>/dev/null || true"
+  # Bake the fsck.repair=yes drop-in (above) into the boot config so a disk left
+  # dirty by an unclean shutdown self-repairs on the next boot. Time-capped and
+  # never fatal: update-grub runs os-prober, which can hang.
+  - timeout 60 update-grub 2>/dev/null || true
+  # Boot speed: this is a single-purpose Docker VM, so mask the stock Ubuntu
+  # services that only add boot latency — measured ~2s networkd-wait-online, plus
+  # snapd / apport / ModemManager / udisks2 / e2scrub / rsyslog / polkit. Neither
+  # docker nor the oort agent needs any of them.
+  - systemctl mask --now systemd-networkd-wait-online.service snapd.service snapd.seeded.service snapd.socket snapd.apparmor.service ModemManager.service apport.service udisks2.service e2scrub_reap.service rsyslog.service unattended-upgrades.service polkit.service lvm2-monitor.service multipathd.service multipathd.socket 2>/dev/null || true
+  - systemctl disable --now e2scrub_all.timer apt-daily.timer apt-daily-upgrade.timer fwupd-refresh.timer motd-news.timer update-notifier-download.timer 2>/dev/null || true
+  # Disable cloud-init on subsequent (golden) boots: provisioning is done and its
+  # per-boot re-checks add ~0.9s (and can re-render netplan). Everything it set up
+  # is baked now (netplan, fstab, systemd units); first boot already applied it.
+  - touch /etc/cloud/cloud-init.disabled
+  # Core provisioning is done here — mark ready BEFORE the slow/optional zram step
+  # so `oort start` / build-image never wait on apt (the old reliability sink).
+  - touch /run/oort-ready
+  # zram (module install + swap) runs in the background, time-capped, never blocks.
+  - systemctl enable oort-zram.service || true
+  - systemctl start --no-block oort-zram.service || true

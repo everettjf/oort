@@ -1,0 +1,8 @@
+.build/
+.swiftpm/
+images/
+*.nvram
+*.img
+share/
+build/
+bin/

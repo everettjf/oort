@@ -1,0 +1,699 @@
+#!/usr/bin/env bash
+# oort — the oort command-line front-end (Stage 4).
+#
+# A thin, OrbStack-style wrapper around `oort run`: start/stop the VM, run
+# commands in the guest, and point the Docker CLI at the projected socket.
+#
+#   oort start                 boot the VM (Docker + file sharing + Rosetta + ports)
+#   oort stop                  shut the VM down
+#   oort status                show VM / Docker status
+#   oort doctor [--heal]       probe VM/dockerd/agent health (host-side); --heal recovers
+#   oort exec <cmd...>         run a command inside the guest
+#   oort shell                 interactive-ish guest shell (line at a time)
+#   oort docker <args...>      run docker against the oort daemon
+#   oort env                   print `export DOCKER_HOST=...` for your shell
+#   oort logs                  tail the guest console log
+#   oort build-image           build + provision the disk, snapshot a golden image
+#   oort build-kernel          build a custom minimal kernel in the guest, use it for direct boot
+#   oort reset                 restore the disk from the golden snapshot
+#   oort route enable|disable  reach containers by their docker0 IP (sudo)
+#   oort k8s enable|disable    run Kubernetes (k3s) in the guest
+#   oort machine ...           manage named Linux machines (create/list/shell/…)
+#   oort machine snapshot/restore/fork   time-travel: branch & roll back an env
+#   oort fastvol <name> [path] fast guest-disk volume for a hot dir (node_modules…)
+#   oort up [file]             bring up machines declared in oort.yaml (env-as-code)
+#   oort down [file]           tear those machines down
+#   oort mcp                   MCP server: oort sandboxes for AI agents (stdio)
+#   oort gui                   launch the native menu-bar app
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+STATE="$HOME/.oort"
+DOCKER_SOCK="$STATE/docker.sock"
+AGENT_SOCK="$STATE/agent.sock"
+CONSOLE_LOG="$STATE/console.log"
+PIDFILE="$STATE/vm.pid"
+DISK="${OORT_DISK:-$HERE/images/disk.img}"
+SEED="${OORT_SEED:-$HERE/images/seed.img}"
+GOLDEN="${OORT_GOLDEN:-$HERE/images/disk-golden.img}"
+SHARE="${OORT_SHARE:-$HERE/share}"
+# gvproxy user-space netstack (opt-in: OORT_NET=gvproxy). The guest NIC attaches
+# to gvproxy on the host instead of VZ NAT, so traffic follows the Mac's routes/VPN
+# and DNS. gvproxy's default gateway (also its DNS) is 192.168.127.1.
+GVPROXY="${OORT_GVPROXY:-$HERE/bin/gvproxy}"
+GVNET_SOCK="$STATE/gvproxy-net.sock"
+GVCTL_SOCK="$STATE/gvproxy-ctl.sock"
+GVPIDFILE="$STATE/gvproxy.pid"
+GVPROXY_GW="192.168.127.1"
+mkdir -p "$STATE"
+
+bin() {
+  # Use the stable SwiftPM release symlink directly — don't run `swift build`
+  # on every start (it takes the .build package lock, which deadlocks if a
+  # previous run is mid-build). Only build when the binary is actually missing.
+  local b="$HERE/.build/release/oort"
+  [ -x "$b" ] || (cd "$HERE" && swift build -c release >/dev/null)
+  # ALWAYS (re)apply the entitlement: a plain `swift build` strips the ad-hoc
+  # signature, and VZ refuses to launch without com.apple.security.virtualization
+  # (VZErrorDomain Code=2). Signing is cheap and idempotent.
+  codesign --force --sign - --entitlements "$HERE/oort.entitlements" "$b" >/dev/null 2>&1
+  echo "$b"
+}
+
+vm_running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
+
+# Make the guest follow the Mac's DNS resolvers, so containers can resolve
+# internal / VPN domains the way they do on the host. Non-loopback macOS
+# resolvers go first; 1.1.1.1 stays as a public fallback. Guest NAT routes the
+# DNS packets out through macOS, so VPN-reachable resolvers work too.
+sync_dns() {
+  local lines body b64
+  # IPv4 resolvers only (the guest has IPv6 disabled), not loopback; one
+  # "nameserver X" per line via sed (avoids any word-splitting pitfalls).
+  lines=$(scutil --dns 2>/dev/null | awk '/nameserver\[/{print $3}' \
+        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -vE '^(127\.|0\.0\.0\.0)' \
+        | awk '!seen[$0]++' | head -3 | sed 's/^/nameserver /')
+  # timeout:2 attempts:1 → if the Mac's resolver is slow to answer through VZ NAT
+  # (common right after boot), fail over to 1.1.1.1 in ~2s instead of stalling the
+  # default 5s per server, which otherwise makes container DNS (and any pull/egress
+  # that needs it) intermittently time out.
+  body=$(printf '%s\nnameserver 1.1.1.1\noptions single-request timeout:2 attempts:1\n' "$lines")
+  # base64 the multi-line content so it ships cleanly through the agent.
+  b64=$(printf '%s' "$body" | base64 | tr -d '\n')
+  curl -s --max-time 12 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
+    "echo $b64 | base64 -d > /etc/resolv.conf" http://localhost/ >/dev/null 2>&1 || true
+}
+
+# Under gvproxy, point the guest at gvproxy's own DNS (its gateway). gvproxy
+# forwards queries to the Mac's system resolver — so internal/VPN domains follow
+# the host automatically, without us scraping `scutil`.
+sync_dns_gvproxy() {
+  local body b64
+  body=$(printf 'nameserver %s\noptions single-request timeout:2 attempts:2\n' "$GVPROXY_GW")
+  b64=$(printf '%s' "$body" | base64 | tr -d '\n')
+  curl -s --max-time 12 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
+    "echo $b64 | base64 -d > /etc/resolv.conf" http://localhost/ >/dev/null 2>&1 || true
+}
+
+# Mount the Mac home (VirtioFS tag "home") at the same absolute path inside the
+# guest, and persist it in fstab so later boots remount it without the agent.
+mount_home() {
+  curl -s --max-time 15 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
+    "mkdir -p '$HOME'; grep -q ' $HOME virtiofs' /etc/fstab || echo 'home $HOME virtiofs rw,nofail 0 0' >> /etc/fstab; mountpoint -q '$HOME' || mount -t virtiofs home '$HOME'" \
+    http://localhost/ >/dev/null 2>&1 || true
+}
+
+cmd_start() {
+  [ "${1:-}" = "--home" ] && { MOUNT_HOME=1; shift; }
+  if vm_running; then echo "oort already running (pid $(cat "$PIDFILE"))"; return 0; fi
+  rm -f "$PIDFILE"   # clear any stale pidfile from a crashed/old run
+  [ -f "$DISK" ] || { echo "no disk image at $DISK — run 'oort build-image' first"; exit 1; }
+  # Guard against a leftover VM still holding the disk image.
+  if pgrep -f "oort run .*$DISK" >/dev/null 2>&1; then
+    echo "another oort VM is still using $DISK; run 'oort stop' or kill it first"; exit 1
+  fi
+  local b; b="$(bin)"
+  rm -f "$DOCKER_SOCK" "$AGENT_SOCK"
+  echo "starting oort VM…"
+  # Mounts: always the repo share at /mnt/mac (carries provisioning artifacts).
+  # Optionally mirror the Mac home at its real path so `docker -v $PWD:/x` works
+  # for any project under $HOME. Off by default: $HOME contains the VM's own disk
+  # images, so sharing all of it is heavy and stalls first-boot provisioning.
+  # Opt in with `MOUNT_HOME=1 oort start` (or `oort start --home`).
+  local mounts=(--mount "$SHARE:mac")
+  [ "${MOUNT_HOME:-0}" = 1 ] && mounts+=(--mount "$HOME:home")
+  local extra=()
+  [ -f "$K8S_MARKER" ] && extra+=(--tcp-forward 6443)   # project the k3s API
+  # Direct-kernel boot (M2): if a kernel Image is staged, boot it straight via VZ's
+  # VZLinuxBootLoader — skipping the EFI firmware + GRUB stage for a faster cold
+  # start. Falls back to EFI automatically when the artifact is absent, or when
+  # forced with OORT_BOOT=efi (the always-safe escape hatch). A custom kernel
+  # can be dropped in at the same path; root is /dev/vda1 on the cloud image.
+  local boot=()
+  local KERNEL="${OORT_KERNEL:-$HERE/images/kernel-Image}"
+  local INITRD="${OORT_INITRD:-$HERE/images/kernel-initrd}"
+  local KCMDLINE="${OORT_CMDLINE:-console=hvc0 root=/dev/vda1 ro fsck.repair=yes}"
+  if [ "${OORT_BOOT:-}" != "efi" ] && [ -f "$KERNEL" ]; then
+    boot=(--kernel "$KERNEL" --cmdline "$KCMDLINE")
+    [ -f "$INITRD" ] && boot+=(--initrd "$INITRD")
+    echo "(direct-kernel boot: $(basename "$KERNEL"))"
+  fi
+  # gvproxy user-space netstack (opt-in). Spawn it on the host, wait for its vfkit
+  # socket, then attach the guest NIC to it instead of VZ NAT.
+  local net=()
+  if [ "${OORT_NET:-}" = gvproxy ]; then
+    [ -x "$GVPROXY" ] || { echo "OORT_NET=gvproxy but no gvproxy at $GVPROXY — run './make-net.sh' to fetch it"; exit 1; }
+    rm -f "$GVNET_SOCK" "$GVNET_SOCK.vm" "$GVCTL_SOCK"
+    nohup "$GVPROXY" -listen-vfkit "unixgram://$GVNET_SOCK" -listen "unix://$GVCTL_SOCK" \
+      -mtu 1500 -pid-file "$GVPIDFILE" > "$STATE/gvproxy.log" 2>&1 &
+    for _ in $(seq 1 50); do [ -S "$GVNET_SOCK" ] && break; sleep 0.1; done
+    [ -S "$GVNET_SOCK" ] || { echo "gvproxy didn't come up (see $STATE/gvproxy.log)"; exit 1; }
+    net=(--net-vfkit "$GVNET_SOCK")
+    echo "(gvproxy user-space netstack)"
+  fi
+  nohup "$b" run \
+    --disk "$DISK" --seed "$SEED" ${boot[@]+"${boot[@]}"} ${net[@]+"${net[@]}"} \
+    "${mounts[@]}" --rosetta ${extra[@]+"${extra[@]}"} \
+    --forward "$AGENT_SOCK:2376" \
+    --no-console --console-log "$CONSOLE_LOG" \
+    --socket "$DOCKER_SOCK" > "$STATE/vm.log" 2>&1 &
+  local vmpid=$!; echo "$vmpid" > "$PIDFILE"
+  printf "waiting for Docker"
+  # Up to ~5 min: first-boot provisioning (downloading Docker) is the slow case;
+  # a reused/golden disk is ready in seconds.
+  # Poll fast (every 0.5s) so we return the instant Docker is ready rather than
+  # rounding up to a slow tick — the golden boot is ready in a few seconds. ~300s
+  # ceiling (600 × 0.5s) still covers the slow first-boot/provisioning case.
+  for _ in $(seq 1 600); do
+    # If the engine exits early (e.g. the disk is locked by another VM, or VZ
+    # refused to boot), don't keep polling for 5 minutes — surface the real
+    # error from vm.log immediately so 'oort start' fails fast and clearly.
+    if ! kill -0 "$vmpid" 2>/dev/null; then
+      echo " failed."; rm -f "$PIDFILE"
+      tail -3 "$STATE/vm.log" 2>/dev/null | sed 's/^/  /'
+      exit 1
+    fi
+    # Wait for /version, not just /_ping: _ping goes green a moment before the
+    # daemon can actually create containers, which races the first `docker run`.
+    if curl -s --max-time 4 --unix-socket "$DOCKER_SOCK" http://localhost/version 2>/dev/null | grep -q '"ApiVersion"'; then
+      echo " ready."
+      [ "${MOUNT_HOME:-0}" = 1 ] && mount_home
+      if [ "${OORT_NET:-}" = gvproxy ]; then sync_dns_gvproxy; else sync_dns; fi
+      echo; cmd_env; return 0
+    fi
+    printf "."; sleep 0.5
+  done
+  echo " timed out (see $CONSOLE_LOG)"; exit 1
+}
+
+# Tear down the gvproxy netstack helper (if it was started). Safe no-op otherwise.
+_kill_gvproxy() {
+  [ -f "$GVPIDFILE" ] && kill "$(cat "$GVPIDFILE")" 2>/dev/null
+  rm -f "$GVPIDFILE" "$GVNET_SOCK" "$GVNET_SOCK.vm" "$GVCTL_SOCK"
+}
+
+cmd_stop() {
+  if ! vm_running; then echo "oort not running"; rm -f "$PIDFILE"; _kill_gvproxy; return 0; fi
+  local pid; pid="$(cat "$PIDFILE")"
+  printf "stopping (graceful)…"
+  kill -INT "$pid" 2>/dev/null || true   # → VZ requestStop → guest powers off
+  # Poll up to 30s; a healthy guest powers off in a couple of seconds. The
+  # longer window avoids force-killing a busy guest (which corrupts the disk
+  # and breaks the next boot's networking).
+  for _ in $(seq 1 60); do
+    kill -0 "$pid" 2>/dev/null || { echo " stopped."; rm -f "$PIDFILE"; _kill_gvproxy; return 0; }
+    sleep 0.5
+  done
+  echo " forcing."
+  kill -9 "$pid" 2>/dev/null || true
+  rm -f "$PIDFILE"
+  _kill_gvproxy
+}
+
+cmd_status() {
+  if vm_running; then echo "VM:     running (pid $(cat "$PIDFILE"))"; else echo "VM:     stopped"; fi
+  if curl -s --max-time 4 --unix-socket "$DOCKER_SOCK" http://localhost/_ping 2>/dev/null | grep -q OK; then
+    local v; v="$(curl -s --unix-socket "$DOCKER_SOCK" http://localhost/version 2>/dev/null \
+      | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["Version"],d["Os"]+"/"+d["Arch"])' 2>/dev/null)"
+    echo "Docker: up ($v)"
+  else
+    echo "Docker: unreachable"
+  fi
+}
+
+cmd_exec() {
+  [ $# -gt 0 ] || { echo "usage: oort exec <command...>"; exit 1; }
+  curl -s --max-time 125 --unix-socket "$AGENT_SOCK" -X POST --data-binary "$*" http://localhost/ \
+    || { echo "guest agent unreachable (is the VM started?)"; exit 1; }
+}
+
+cmd_shell() {
+  echo "oort guest shell — type commands, 'exit' to quit"
+  while true; do printf 'guest$ '; IFS= read -r line || break; [ "$line" = exit ] && break; [ -z "$line" ] && continue; cmd_exec "$line"; done
+}
+
+cmd_env() { echo "export DOCKER_HOST=unix://$DOCKER_SOCK"; }
+
+cmd_docker() { DOCKER_HOST="unix://$DOCKER_SOCK" docker "$@"; }
+
+cmd_logs() { tail -f "$CONSOLE_LOG"; }
+
+# Build a fully-provisioned "golden" disk: create raw disk + seed + agent, then
+# boot once so cloud-init finishes (installs Docker etc.), stop cleanly, and
+# snapshot the ready disk. After this, every `oort start` is the fast reuse path
+# (no provisioning) — and `oort reset` can restore the golden image instantly.
+cmd_build_image() {
+  (cd "$HERE" && ./make-image.sh)
+  echo "==> provisioning the image (one-time first boot)…"
+  # Provision under EFI, not whatever kernel happens to be staged: EFI is the most
+  # robust boot path, and it keeps the golden kernel-agnostic (a custom kernel may
+  # introduce interfaces like dummy0 that confuse cloud-init's NIC detection during
+  # provisioning). The stock kernel is staged for direct boot at the end.
+  MOUNT_HOME=0 OORT_BOOT=efi cmd_start >/dev/null   # $HOME share would stall the provisioning boot
+  # Wait for the provisioning CORE to finish (docker/agent/mounts/rosetta) —
+  # this marker is touched before the optional zram step, so it's fast & reliable.
+  printf "    finishing provisioning"
+  local ready=0
+  for _ in $(seq 1 90); do
+    curl -s --max-time 5 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
+      'test -e /run/oort-ready && echo READY' http://localhost/ 2>/dev/null | grep -q READY && { ready=1; break; }
+    printf "."; sleep 2
+  done
+  echo
+  [ "$ready" = 1 ] || echo "    warning: provisioning didn't signal ready in time (snapshotting anyway)"
+  # Best-effort, bounded: give the background zram step a moment to bake into the
+  # golden image. Never fatal — reliability doesn't depend on it.
+  printf "    finishing zram (best-effort)"
+  for _ in $(seq 1 45); do
+    curl -s --max-time 5 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
+      'test -e /run/oort-zram-done && echo Z' http://localhost/ 2>/dev/null | grep -q Z && break
+    printf "."; sleep 2
+  done
+  echo
+  # Stage the kernel for direct-kernel boot (M2): decompress the guest's kernel
+  # Image and copy its initrd onto the share, then keep them next to the disk.
+  # `oort start` boots these via VZLinuxBootLoader (skipping EFI+GRUB), falling
+  # back to EFI if absent. A custom-built Image can replace kernel-Image later.
+  printf "    staging kernel for direct boot"
+  curl -s --max-time 40 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
+    'mountpoint -q /mnt/mac || mount -t virtiofs mac /mnt/mac; zcat /boot/vmlinuz-$(uname -r) > /mnt/mac/kernel-Image; cp /boot/initrd.img-$(uname -r) /mnt/mac/kernel-initrd; sync' \
+    http://localhost/ >/dev/null 2>&1 || true
+  if [ -s "$SHARE/kernel-Image" ]; then
+    mv -f "$SHARE/kernel-Image" "$HERE/images/kernel-Image"
+    mv -f "$SHARE/kernel-initrd" "$HERE/images/kernel-initrd" 2>/dev/null || true
+    echo " ok"
+  else
+    echo " skipped (will EFI-boot)"
+  fi
+  # Quiesce the guest BEFORE stopping. The background zram step runs apt, which can
+  # still be mid-install here and keeps systemd busy past the graceful-stop window —
+  # forcing a kill that corrupts the golden (later boots then hit ld.so/libc
+  # assertions). Stop the zram unit (kills its apt child via the cgroup) and sync,
+  # so the graceful poweroff finishes in a couple of seconds and never force-kills.
+  curl -s --max-time 30 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
+    'systemctl stop oort-zram.service 2>/dev/null; sync; sync; echo quiesced' \
+    http://localhost/ >/dev/null 2>&1 || true
+  cmd_stop  >/dev/null
+  echo "==> snapshotting golden image"
+  cp -c "$DISK" "$GOLDEN" 2>/dev/null || cp "$DISK" "$GOLDEN"
+  echo "done. 'oort start' is now instant; 'oort reset' restores this snapshot."
+}
+
+# Build a custom minimal MONOLITHIC kernel in the guest and install it as the
+# direct-boot kernel (M2). Built with everything oort/Docker need =y and no
+# loadable modules, so it boots with NO initramfs, is smaller than the stock
+# kernel, and has zram built in. Opt-in: the default stays the stock direct-boot.
+# If a custom kernel ever fails to boot, `OORT_BOOT=efi oort start` (or re-run
+# `oort build-image`) reverts instantly. First build ~20-40 min; re-runs reuse the
+# cached source. The heavy build runs in its own guest unit, surviving agent blips.
+cmd_build_kernel() {
+  vm_running || { echo "start oort first ('oort start')"; exit 1; }
+  cp "$HERE/kernel/build-in-guest.sh" "$SHARE/build-in-guest.sh"
+  gk() { curl -s --max-time 60 --unix-socket "$AGENT_SOCK" -X POST --data-binary "$1" http://localhost/ 2>/dev/null; }
+  echo "building a custom kernel in the guest (~20-40 min the first time)…"
+  gk 'systemctl reset-failed oort-kbuild 2>/dev/null; systemd-run --unit=oort-kbuild --collect /bin/bash /mnt/mac/build-in-guest.sh >/dev/null 2>&1; echo ok' >/dev/null
+  printf "compiling"
+  local s
+  for _ in $(seq 1 120); do
+    s="$(gk 'if [ -f /root/kbuild-done ]; then echo DONE; elif [ -f /root/kbuild-fail ]; then echo FAIL; else echo RUN; fi')"
+    case "$s" in
+      *DONE*) echo " done."; break;;
+      *FAIL*) echo " failed:"; gk 'tail -15 /root/kbuild.log' | sed 's/^/  /'; exit 1;;
+      *) printf "."; sleep 30;;
+    esac
+  done
+  [ -s "$SHARE/kernel-Image-custom" ] || { echo "no kernel Image produced (still building? check 'oort exec tail /root/kbuild.log')"; exit 1; }
+  mv -f "$SHARE/kernel-Image-custom" "$HERE/images/kernel-Image"
+  rm -f "$HERE/images/kernel-initrd"   # monolithic kernel → no initramfs
+  echo "custom kernel installed → images/kernel-Image (monolithic, no initrd)."
+  echo "boot it with:  oort restart      (revert any time: OORT_BOOT=efi oort start, or oort build-image)"
+}
+
+# Restore the provisioned disk from the golden snapshot (discard all changes).
+cmd_reset() {
+  vm_running && { echo "stop the VM first ('oort stop')"; exit 1; }
+  [ -f "$GOLDEN" ] || { echo "no golden image — run 'oort build-image' first"; exit 1; }
+  cp -c "$GOLDEN" "$DISK" 2>/dev/null || cp "$GOLDEN" "$DISK"
+  rm -f "$DISK.nvram"
+  echo "reset to the golden image."
+}
+
+# Env-as-code: bring up the machines declared in oort.yaml (or .json), running
+# each machine's one-time `setup` commands. Reproducible dev environments from a
+# file you commit alongside the repo. Idempotent: existing machines are left
+# alone (setup runs only for machines freshly created this run).
+cmd_up() {
+  local file="${1:-}"
+  if [ -z "$file" ]; then
+    for f in oort.yaml oort.yml oort.json; do [ -f "$f" ] && { file="$f"; break; }; done
+  fi
+  [ -n "$file" ] && [ -f "$file" ] || { echo "no env file (looked for oort.yaml/.yml/.json) — pass one: 'oort up <file>'"; exit 1; }
+  local plan; plan="$(python3 "$HERE/tools/oort-env.py" up "$file")" || exit 1
+  vm_running || { echo "starting oort…"; cmd_start >/dev/null; }
+  # Process the flat plan: C=create (skip if the machine exists), S=setup (only
+  # run for machines we created this run, so re-running `up` is cheap & safe).
+  local created=" "
+  while IFS=$'\t' read -r op name arg; do
+    case "$op" in
+      C)
+        if cmd_docker container inspect "$MACHINE_PREFIX$name" >/dev/null 2>&1; then
+          echo "machine '$name' exists — skipping"
+        else
+          cmd_machine create "$name" "$arg" && created="$created$name "
+        fi
+        ;;
+      S)
+        case "$created" in *" $name "*)
+          echo "  [$name] setup: $arg"
+          cmd_machine exec "$name" sh -c "$arg" ;;
+        esac
+        ;;
+    esac
+  done <<< "$plan"
+  echo "up to date."
+}
+
+# Tear down the machines declared in the env file (snapshots are kept; add
+# --purge to also drop them).
+cmd_down() {
+  local file="" purge=""
+  for a in "$@"; do [ "$a" = "--purge" ] && purge="--purge" || file="$a"; done
+  if [ -z "$file" ]; then
+    for f in oort.yaml oort.yml oort.json; do [ -f "$f" ] && { file="$f"; break; }; done
+  fi
+  [ -n "$file" ] && [ -f "$file" ] || { echo "no env file (looked for oort.yaml/.yml/.json) — pass one: 'oort down <file>'"; exit 1; }
+  vm_running || { echo "oort not running"; exit 0; }
+  python3 "$HERE/tools/oort-env.py" down "$file" | while IFS= read -r name; do
+    cmd_machine delete "$name" $purge
+  done
+}
+
+# Keep a hot directory (node_modules, build output, target/) on the guest's OWN
+# fast ext4 disk instead of the virtiofs bind mount. Measured: virtiofs is 8-35×
+# slower than the guest disk on per-file metadata ops (rm -rf, scans, watchers) —
+# see docs/dev-filesystem.md. This creates a Docker named volume (lives on the
+# guest disk = native speed) and prints the flag to overlay it on that path while
+# you keep bind-mounting your source.
+cmd_fastvol() {
+  case "${1:-}" in
+    ls) cmd_docker volume ls --filter name=oortfast- --format '{{.Name}}' 2>/dev/null | sed 's/^oortfast-/  /'; return 0;;
+    rm) local n="${2:?usage: oort fastvol rm <name>}"; cmd_docker volume rm "oortfast-$n" >/dev/null 2>&1 && echo "removed '$n'" || echo "no such fast volume '$n'"; return 0;;
+  esac
+  local name="${1:-}"
+  [ -n "$name" ] || { echo "usage: oort fastvol <name> [/container/path]   (default path /app/node_modules)"; echo "       oort fastvol ls | rm <name>"; exit 1; }
+  local path="${2:-/app/node_modules}" vol="oortfast-$name"
+  cmd_docker volume inspect "$vol" >/dev/null 2>&1 || cmd_docker volume create "$vol" >/dev/null
+  echo "fast volume '$vol' ready — on the guest's ext4 (native speed, no virtiofs penalty)."
+  echo
+  echo "  docker run:  -v \"\$PWD:/app\" -v $vol:$path -w /app <image> …"
+  echo "  compose:     services.<svc>.volumes: [\"$vol:$path\"]  +  top-level volumes: {$vol: {}}"
+}
+
+# Host-side health probe. Distinguishes the failure modes that look alike from
+# the outside: VM down vs dockerd wedged (vsock 2375 bridge) vs the guest agent
+# wedged (vsock 2376 exec). The guest now self-heals both a wedged dockerd
+# (oort-watchdog) and a wedged agent (systemd WatchdogSec), so `--heal` mostly
+# gives that a moment and only restarts the VM as a last resort.
+cmd_doctor() {
+  local heal=""; [ "${1:-}" = "--heal" ] && heal=1
+  local vm=down docker=down agent=down
+  vm_running && vm=up
+  curl -s --max-time 4 --unix-socket "$DOCKER_SOCK" http://localhost/_ping 2>/dev/null | grep -q OK && docker=up
+  [ "$(curl -s --max-time 5 --unix-socket "$AGENT_SOCK" -X POST --data-binary 'echo ok' http://localhost/ 2>/dev/null)" = ok ] && agent=up
+  echo "VM:     $vm"
+  echo "Docker: $docker   (vsock 2375 bridge → dockerd)"
+  echo "Agent:  $agent   (vsock 2376 exec)"
+  if [ "$vm" = up ] && [ "$docker" = up ] && [ "$agent" = up ]; then
+    echo "→ healthy."; return 0
+  fi
+  if [ "$vm" = down ]; then echo "→ VM not running. Run 'oort start'."; return 1; fi
+  # VM is up but something inside is wedged. The in-guest watchdogs should recover
+  # it on their own within ~30s; surface that, and (with --heal) wait then restart.
+  [ "$docker" = down ] && echo "→ dockerd unreachable — the in-guest liveness watchdog restarts it on sustained failure (~30-60s)."
+  [ "$agent" = down ] && echo "→ guest agent unreachable — the in-guest watchdog restarts it when its heartbeat goes stale (~60-90s)."
+  if [ -n "$heal" ]; then
+    printf "   waiting up to 45s for self-heal"
+    for _ in $(seq 1 15); do
+      printf "."; sleep 3
+      local d=down a=down
+      curl -s --max-time 4 --unix-socket "$DOCKER_SOCK" http://localhost/_ping 2>/dev/null | grep -q OK && d=up
+      [ "$(curl -s --max-time 4 --unix-socket "$AGENT_SOCK" -X POST --data-binary 'echo ok' http://localhost/ 2>/dev/null)" = ok ] && a=up
+      [ "$d" = up ] && [ "$a" = up ] && { echo " recovered."; return 0; }
+    done
+    echo " still wedged — restarting the VM as a last resort."
+    cmd_stop >/dev/null; cmd_start >/dev/null; cmd_doctor
+  else
+    echo "   (run 'oort doctor --heal' to wait for self-heal and restart the VM if needed.)"
+    return 1
+  fi
+}
+
+# Run the MCP server (stdio) so AI coding agents get oort sandboxes as
+# first-class tools: create_sandbox / exec / snapshot / restore / fork / destroy.
+# Wire into a client, e.g.:  claude mcp add oort -- /path/to/oort mcp
+cmd_mcp() { exec python3 "$HERE/mcp/oort-mcp.py" "$@"; }
+
+# Launch the native SwiftUI app: a windowed control panel (Dashboard, Containers,
+# Images, Volumes, Machines, Settings) + a menu-bar item. Bundles it into a proper
+# .app first (a bare WindowGroup binary doesn't reliably show its window).
+cmd_gui() {
+  (cd "$HERE" && ./make-app.sh >/dev/null) || { echo "GUI build failed"; exit 1; }
+  OORT_HOME="$HERE" open "$HERE/build/oort.app"
+  echo "oort launched (window + menu-bar item)."
+}
+
+# Named Linux machines (M7): persistent, multi-distro environments you can shell
+# into — OrbStack's "machines". Backed by long-lived containers on the shared
+# guest kernel (leverages the working Docker engine; no extra packages). A
+# machine is a container named ovm-<name> running an idle init you exec into.
+#
+# Beyond OrbStack: because a machine is just a container, its whole filesystem
+# state is a content-addressed image we can commit, branch and roll back —
+# "git for dev environments". `snapshot` commits the live state to a tagged
+# image; `restore` rolls a machine back to a snapshot; `fork` instantly clones a
+# fully-set-up machine into a new one (CoW image layers, no re-provisioning).
+MACHINE_PREFIX="ovm-"
+SNAP_REPO="oort-machine"   # local docker repo namespace for machine snapshots
+
+# Run the idle "machine" container <name> from <image> (the shared shape used by
+# create / restore / fork). Long-lived + auto-restart; you exec/shell into it.
+_machine_run() {
+  local name="$1" image="$2"
+  cmd_docker run -d --name "$MACHINE_PREFIX$name" --hostname "$name" --restart unless-stopped \
+    "$image" sh -c 'while :; do sleep 3600; done' >/dev/null
+}
+
+# Resolve a snapshot tag for <name>: prints the newest snapshot tag (empty if none).
+_machine_latest_snap() {
+  cmd_docker images "$SNAP_REPO/$1" --format '{{.Tag}}\t{{.CreatedAt}}' \
+    | sort -t"$(printf '\t')" -k2 | tail -1 | cut -f1
+}
+
+cmd_machine() {
+  local sub="${1:-list}"; shift || true
+  case "$sub" in
+    create)
+      local name="${1:?usage: oort machine create <name> [distro]}" distro="${2:-ubuntu}"
+      cmd_docker container inspect "$MACHINE_PREFIX$name" >/dev/null 2>&1 && { echo "machine '$name' already exists"; exit 1; }
+      cmd_docker image inspect "$distro" >/dev/null 2>&1 || { echo "pulling ${distro}…"; cmd_docker pull "$distro" >/dev/null; }
+      _machine_run "$name" "$distro" \
+        && echo "machine '$name' ($distro) created — 'oort machine shell $name'"
+      ;;
+    snapshot|commit)
+      # Commit the machine's live filesystem to a tagged, content-addressed image.
+      local name="${1:?usage: oort machine snapshot <name> [tag]}"; local tag="${2:-}"
+      cmd_docker container inspect "$MACHINE_PREFIX$name" >/dev/null 2>&1 || { echo "no machine '$name'"; exit 1; }
+      [ -n "$tag" ] || tag="$(date +%Y%m%d-%H%M%S)"
+      cmd_docker commit "$MACHINE_PREFIX$name" "$SNAP_REPO/$name:$tag" >/dev/null \
+        && echo "snapshot '$name' → $tag   ('oort machine restore $name $tag' to roll back)"
+      ;;
+    snapshots)
+      local name="${1:?usage: oort machine snapshots <name>}"
+      printf "%-23s %-20s %s\n" TAG CREATED SIZE
+      cmd_docker images "$SNAP_REPO/$name" --format '{{.Tag}}\t{{.CreatedSince}}\t{{.Size}}' \
+        | awk -F'\t' '{printf "%-23s %-20s %s\n",$1,$2,$3}'
+      ;;
+    restore)
+      # Roll a machine back to a snapshot (newest if no tag). Replaces the live
+      # container; snapshot first if you want to keep the current state.
+      local name="${1:?usage: oort machine restore <name> [tag]}"; local tag="${2:-}"
+      [ -n "$tag" ] || tag="$(_machine_latest_snap "$name")"
+      [ -n "$tag" ] || { echo "no snapshots for '$name' — run 'oort machine snapshot $name' first"; exit 1; }
+      cmd_docker image inspect "$SNAP_REPO/$name:$tag" >/dev/null 2>&1 || { echo "no snapshot '$name:$tag'"; exit 1; }
+      cmd_docker rm -f "$MACHINE_PREFIX$name" >/dev/null 2>&1 || true
+      _machine_run "$name" "$SNAP_REPO/$name:$tag" \
+        && echo "restored '$name' from snapshot $tag"
+      ;;
+    fork|clone)
+      # Instantly branch a fully-set-up machine into a new one. The new machine
+      # shares the source's image layers (CoW) — no re-provisioning, no copy.
+      local src="${1:?usage: oort machine fork <src> <newname>}"
+      local dst="${2:?usage: oort machine fork <src> <newname>}"
+      cmd_docker container inspect "$MACHINE_PREFIX$src" >/dev/null 2>&1 || { echo "no machine '$src'"; exit 1; }
+      cmd_docker container inspect "$MACHINE_PREFIX$dst" >/dev/null 2>&1 && { echo "machine '$dst' already exists"; exit 1; }
+      printf "forking '%s' → '%s'…" "$src" "$dst"
+      cmd_docker commit "$MACHINE_PREFIX$src" "$SNAP_REPO/$dst:forked-from-$src" >/dev/null
+      _machine_run "$dst" "$SNAP_REPO/$dst:forked-from-$src" \
+        && echo " done — 'oort machine shell $dst'"
+      ;;
+    list|ls)
+      echo "NAME            DISTRO          STATUS"
+      cmd_docker ps -a --filter "name=$MACHINE_PREFIX" --format '{{.Names}}\t{{.Image}}\t{{.Status}}' \
+        | sed "s/^$MACHINE_PREFIX//" | awk -F'\t' '{printf "%-15s %-15s %s\n",$1,$2,$3}'
+      ;;
+    exec)
+      local name="${1:?usage: oort machine exec <name> <cmd...>}"; shift
+      [ $# -gt 0 ] || { echo "usage: oort machine exec <name> <cmd...>"; exit 1; }
+      # Route through the guest agent (docker exec runs locally against
+      # /run/docker.sock inside the guest). Going through the host docker CLI
+      # over the vsock socket proxy loses output, because `docker exec` uses a
+      # hijacked/upgraded bidirectional stream the proxy doesn't carry cleanly.
+      #
+      # The agent runs the request body via `/bin/sh -c`, so it RE-PARSES it as a
+      # shell line. Shell-quote each argv with %q so that re-parse rebuilds the
+      # exact same argv for `docker exec`; otherwise redirections/pipes/quotes in
+      # the user's command are interpreted on the guest host instead of inside the
+      # container (e.g. `machine exec m sh -c 'echo x > /f'` wrote /f on the guest,
+      # not in the machine). %q uses POSIX backslash escaping for the usual shell
+      # metacharacters, which the guest's dash handles.
+      local q; printf -v q '%q ' docker exec "$MACHINE_PREFIX$name" "$@"
+      cmd_exec "$q"
+      ;;
+    shell)
+      local name="${1:?usage: oort machine shell <name>}"
+      cmd_docker exec -it "$MACHINE_PREFIX$name" sh -c 'command -v bash >/dev/null 2>&1 && exec bash || exec sh'
+      ;;
+    delete|rm)
+      # `delete <name>` removes the live machine but keeps its snapshots (so you
+      # can re-`restore`); add `--purge` to also drop the snapshot images.
+      local name="${1:?usage: oort machine delete <name> [--purge]}"
+      cmd_docker rm -f "$MACHINE_PREFIX$name" >/dev/null && echo "machine '$name' deleted"
+      if [ "${2:-}" = "--purge" ]; then
+        cmd_docker images "$SNAP_REPO/$name" --format '{{.Repository}}:{{.Tag}}' \
+          | xargs -r -n1 -I{} sh -c "DOCKER_HOST=unix://$DOCKER_SOCK docker rmi -f {} >/dev/null 2>&1" \
+          && echo "snapshots of '$name' purged"
+      fi
+      ;;
+    *) echo "usage: oort machine create|list|exec|shell|delete <name> [distro]
+       time-travel: oort machine snapshot|snapshots|restore <name> [tag]
+                    oort machine fork <src> <newname>";;
+  esac
+}
+
+# Kubernetes via k3s in the guest (M6). Installs k3s, projects its API server
+# (guest 127.0.0.1:6443) onto the Mac's localhost:6443 (static tcp-forward), and
+# writes a kubeconfig. `oort start` adds the 6443 forward whenever k8s is enabled.
+K8S_MARKER="$STATE/k8s-enabled"
+KUBECONFIG_OUT="$STATE/kube/config"
+cmd_k8s() {
+  case "${1:-status}" in
+    enable)
+      vm_running || { echo "start oort first ('oort start')"; exit 1; }
+      echo "installing k3s in the guest (one-time, ~1 min)…"
+      gx() { curl -s --max-time 240 --unix-socket "$AGENT_SOCK" -X POST --data-binary "$1" http://localhost/ 2>/dev/null; }
+      gx 'command -v k3s >/dev/null 2>&1 || curl -sfL https://get.k3s.io | sh -s - --write-kubeconfig-mode 644 >/dev/null 2>&1; echo done' >/dev/null
+      printf "waiting for the kube API"
+      for _ in $(seq 1 60); do
+        gx 'test -f /etc/rancher/k3s/k3s.yaml && curl -sk https://127.0.0.1:6443/version >/dev/null 2>&1 && echo UP' | grep -q UP && break
+        printf "."; sleep 2
+      done; echo
+      mkdir -p "$(dirname "$KUBECONFIG_OUT")"
+      gx 'cat /etc/rancher/k3s/k3s.yaml' > "$KUBECONFIG_OUT"
+      grep -q 'server:' "$KUBECONFIG_OUT" || { echo "failed to fetch kubeconfig"; exit 1; }
+      touch "$K8S_MARKER"
+      echo "restarting to project the kube API on localhost:6443…"
+      cmd_stop >/dev/null; cmd_start >/dev/null
+      echo "Kubernetes ready. Use it with:"
+      echo "  export KUBECONFIG=$KUBECONFIG_OUT"
+      echo "  kubectl get nodes"
+      ;;
+    disable)
+      rm -f "$K8S_MARKER"
+      gx() { curl -s --max-time 60 --unix-socket "$AGENT_SOCK" -X POST --data-binary "$1" http://localhost/ 2>/dev/null; }
+      vm_running && gx '/usr/local/bin/k3s-uninstall.sh >/dev/null 2>&1; echo done' >/dev/null
+      echo "Kubernetes disabled."
+      ;;
+    *) [ -f "$K8S_MARKER" ] && echo "kubernetes: enabled (KUBECONFIG=$KUBECONFIG_OUT)" || echo "kubernetes: disabled (use 'oort k8s enable')";;
+  esac
+}
+
+# Reach containers by their docker0 IP from macOS (M5, opt-in). The host can
+# already reach the guest IP over VZ NAT; this adds a route so 172.17.0.0/16
+# (Docker's default bridge) goes via the guest, which forwards to the container.
+# NOTE: needs sudo for `route`; re-run after a restart (the guest IP can change).
+cmd_route() {
+  case "${1:-}" in
+    enable)
+      vm_running || { echo "start oort first ('oort start')"; exit 1; }
+      local gip; gip="$(curl -s --max-time 8 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
+        'ip -4 -o addr show enp0s1 | grep -oE "192\.168\.[0-9]+\.[0-9]+" | head -1' http://localhost/ 2>/dev/null)"
+      [ -n "$gip" ] || { echo "couldn't read the guest IP (is the agent up?)"; exit 1; }
+      echo "routing 172.17.0.0/16 via the guest ($gip) — sudo required:"
+      sudo route -n add -net 172.17.0.0/16 "$gip" && \
+        echo "done — containers are now reachable by their docker0 IP from macOS."
+      ;;
+    disable)
+      sudo route -n delete -net 172.17.0.0/16 2>/dev/null && echo "route removed" || echo "no route to remove"
+      ;;
+    *) echo "usage: oort route enable|disable";;
+  esac
+}
+
+# Start oort automatically at login via a per-user LaunchAgent.
+AUTOSTART_PLIST="$HOME/Library/LaunchAgents/dev.oort.plist"
+cmd_autostart() {
+  case "${1:-}" in
+    enable)
+      mkdir -p "$(dirname "$AUTOSTART_PLIST")"
+      cat > "$AUTOSTART_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.oort</string>
+  <key>ProgramArguments</key><array><string>$HERE/oort</string><string>start</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>$STATE/autostart.log</string>
+  <key>StandardErrorPath</key><string>$STATE/autostart.log</string>
+</dict>
+</plist>
+PLIST
+      launchctl unload "$AUTOSTART_PLIST" 2>/dev/null || true
+      launchctl load "$AUTOSTART_PLIST" 2>/dev/null || true
+      echo "autostart enabled (oort will start at login)"
+      ;;
+    disable)
+      launchctl unload "$AUTOSTART_PLIST" 2>/dev/null || true
+      rm -f "$AUTOSTART_PLIST"
+      echo "autostart disabled"
+      ;;
+    *) [ -f "$AUTOSTART_PLIST" ] && echo "autostart: enabled" || echo "autostart: disabled (use 'oort autostart enable')";;
+  esac
+}
+
+case "${1:-help}" in
+  start)        shift; cmd_start "$@";;
+  stop)         shift; cmd_stop "$@";;
+  restart)      shift; cmd_stop; cmd_start "$@";;
+  status)       shift; cmd_status "$@";;
+  doctor)       shift; cmd_doctor "$@";;
+  exec)         shift; cmd_exec "$@";;
+  shell)        shift; cmd_shell "$@";;
+  docker)       shift; cmd_docker "$@";;
+  env)          shift; cmd_env "$@";;
+  autostart)    shift; cmd_autostart "$@";;
+  logs)         shift; cmd_logs "$@";;
+  build-image)  shift; cmd_build_image "$@";;
+  build-kernel) shift; cmd_build_kernel "$@";;
+  reset)        shift; cmd_reset "$@";;
+  route)        shift; cmd_route "$@";;
+  k8s)          shift; cmd_k8s "$@";;
+  machine)      shift; cmd_machine "$@";;
+  up)           shift; cmd_up "$@";;
+  down)         shift; cmd_down "$@";;
+  fastvol)      shift; cmd_fastvol "$@";;
+  mcp)          shift; cmd_mcp "$@";;
+  gui)          shift; cmd_gui "$@";;
+  help|-h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//';;
+  *) echo "unknown command: $1"; echo "run 'oort help'"; exit 1;;
+esac

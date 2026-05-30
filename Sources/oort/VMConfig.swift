@@ -1,0 +1,229 @@
+import Foundation
+import Virtualization
+
+/// Builds a `VZVirtualMachineConfiguration` from our `Config`.
+///
+/// This is the heart of the "Swift + VZ boots Linux" half of Stage 1. Every
+/// device added here mirrors what OrbStack/Lima wire up under the hood:
+///   - virtio-block  : the root disk
+///   - virtio-net    : NAT networking (outbound + host reachability)
+///   - virtio-vsock  : the host<->guest channel we tunnel the Docker socket over
+///   - virtio-entropy / memory balloon : standard hygiene
+///   - virtio-console: serial console for debugging
+enum VMConfig {
+    static func make(_ cfg: Config) throws -> VZVirtualMachineConfiguration {
+        let vm = VZVirtualMachineConfiguration()
+        vm.cpuCount = clampCPU(cfg.cpuCount)
+        vm.memorySize = clampMemory(cfg.memoryBytes)
+
+        vm.platform = VZGenericPlatformConfiguration()
+        vm.bootLoader = try makeBootLoader(cfg.boot)
+
+        var disks: [VZStorageDeviceConfiguration] = [try makeDisk(cfg.diskImage, readOnly: false)]
+        if let seed = cfg.seedImage {
+            disks.append(try makeDisk(seed, readOnly: true)) // cloud-init CIDATA
+        }
+        vm.storageDevices = disks
+        vm.networkDevices = [try makeNetwork(cfg)]
+        vm.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
+        vm.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
+        vm.socketDevices = [VZVirtioSocketDeviceConfiguration()]
+
+        var shares: [VZDirectorySharingDeviceConfiguration] = try cfg.mounts.map { try makeShare($0) }
+        if cfg.rosetta {
+            shares.append(try makeRosettaShare())
+        }
+        vm.directorySharingDevices = shares
+
+        if let logURL = cfg.consoleLog {
+            vm.serialPorts = [try makeConsoleToFile(logURL)]
+        } else if cfg.serialConsole {
+            vm.serialPorts = [makeConsole()]
+        }
+
+        try vm.validate()
+        return vm
+    }
+
+    // MARK: - Boot
+
+    private static func makeBootLoader(_ boot: Config.Boot) throws -> VZBootLoader {
+        switch boot {
+        case .efi(let nvram):
+            let loader = VZEFIBootLoader()
+            loader.variableStore = try efiVariableStore(at: nvram)
+            return loader
+
+        case .kernel(let kernel, let initrd, let cmdline):
+            guard FileManager.default.fileExists(atPath: kernel.path) else {
+                throw CLIError.runtime("kernel not found: \(kernel.path)")
+            }
+            let loader = VZLinuxBootLoader(kernelURL: kernel)
+            loader.commandLine = cmdline
+            if let initrd { loader.initialRamdiskURL = initrd }
+            return loader
+        }
+    }
+
+    private static func efiVariableStore(at url: URL) throws -> VZEFIVariableStore {
+        if FileManager.default.fileExists(atPath: url.path) {
+            return VZEFIVariableStore(url: url)
+        }
+        Log.info("creating EFI NVRAM store at \(url.path)")
+        return try VZEFIVariableStore(creatingVariableStoreAt: url)
+    }
+
+    // MARK: - Devices
+
+    private static func makeDisk(_ url: URL, readOnly: Bool) throws -> VZStorageDeviceConfiguration {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw CLIError.runtime("disk image not found: \(url.path)")
+        }
+        let attachment = try VZDiskImageStorageDeviceAttachment(url: url, readOnly: readOnly)
+        return VZVirtioBlockDeviceConfiguration(attachment: attachment)
+    }
+
+    // MARK: - VirtioFS directory sharing (Stage 2)
+
+    private static func makeShare(_ m: Config.Mount) throws -> VZDirectorySharingDeviceConfiguration {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: m.host.path, isDirectory: &isDir), isDir.boolValue else {
+            throw CLIError.runtime("--mount host directory not found: \(m.host.path)")
+        }
+        do {
+            try VZVirtioFileSystemDeviceConfiguration.validateTag(m.tag)
+        } catch {
+            throw CLIError.runtime("invalid VirtioFS tag '\(m.tag)': \(error.localizedDescription)")
+        }
+        let device = VZVirtioFileSystemDeviceConfiguration(tag: m.tag)
+        let shared = VZSharedDirectory(url: m.host, readOnly: m.readOnly)
+        device.share = VZSingleDirectoryShare(directory: shared)
+        Log.info("virtiofs share: \(m.host.path) → tag '\(m.tag)'\(m.readOnly ? " (ro)" : "")")
+        return device
+    }
+
+    /// Rosetta is shared into the guest under the special tag "rosetta"; the
+    /// guest registers it with binfmt_misc so x86-64 ELF binaries (incl. inside
+    /// amd64 containers) are translated. Installs Rosetta on demand if missing.
+    private static func makeRosettaShare() throws -> VZDirectorySharingDeviceConfiguration {
+        switch VZLinuxRosettaDirectoryShare.availability {
+        case .notSupported:
+            throw CLIError.runtime("Rosetta is not supported on this Mac (Apple Silicon required).")
+        case .notInstalled:
+            Log.info("installing Rosetta (one-time)…")
+            let sem = DispatchSemaphore(value: 0)
+            var installError: Error?
+            VZLinuxRosettaDirectoryShare.installRosetta { error in
+                installError = error
+                sem.signal()
+            }
+            sem.wait()
+            if let installError {
+                throw CLIError.runtime("Rosetta install failed: \(installError.localizedDescription). "
+                    + "Try: softwareupdate --install-rosetta --agree-to-license")
+            }
+        case .installed:
+            break
+        @unknown default:
+            break
+        }
+        let device = VZVirtioFileSystemDeviceConfiguration(tag: "rosetta")
+        device.share = try VZLinuxRosettaDirectoryShare()
+        Log.info("rosetta share enabled (tag 'rosetta')")
+        return device
+    }
+
+    /// The guest NIC: either VZ's built-in NAT (default) or — when a gvproxy
+    /// vfkit socket is given — a file-handle attachment wired to that user-space
+    /// netstack on the host. Same pinned MAC either way (cloud-init matches it).
+    private static func makeNetwork(_ cfg: Config) throws -> VZVirtioNetworkDeviceConfiguration {
+        guard let sock = cfg.netVfkitSocket else { return makeNAT() }
+        let net = VZVirtioNetworkDeviceConfiguration()
+        net.attachment = try makeVfkitAttachment(sock)
+        if let mac = VZMACAddress(string: "0a:00:27:0b:00:01") { net.macAddress = mac }
+        Log.info("network: gvproxy user-space netstack via \(sock)")
+        return net
+    }
+
+    /// Connect a SOCK_DGRAM Unix socket to gvproxy's vfkit listener and wrap it as
+    /// a VZFileHandleNetworkDeviceAttachment. Each datagram is one ethernet frame
+    /// (the protocol vfkit/podman use). Large socket buffers avoid frame drops.
+    private static func makeVfkitAttachment(_ gvproxyPath: String) throws -> VZNetworkDeviceAttachment {
+        let fd = socket(AF_UNIX, SOCK_DGRAM, 0)
+        guard fd >= 0 else { throw CLIError.runtime("net: socket() failed") }
+        // Our own bound address, so gvproxy knows where to send reply frames.
+        let localPath = gvproxyPath + ".vm"
+        unlink(localPath)
+        func setAddr(_ path: String, _ a: inout sockaddr_un) -> Bool {
+            a.sun_family = sa_family_t(AF_UNIX)
+            let b = Array(path.utf8)
+            guard b.count < MemoryLayout.size(ofValue: a.sun_path) else { return false }
+            withUnsafeMutableBytes(of: &a.sun_path) { $0.copyBytes(from: b) }
+            return true
+        }
+        var local = sockaddr_un(), remote = sockaddr_un()
+        guard setAddr(localPath, &local), setAddr(gvproxyPath, &remote) else {
+            close(fd); throw CLIError.runtime("net: socket path too long")
+        }
+        let bound = withUnsafePointer(to: &local) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+        }
+        guard bound == 0 else { close(fd); throw CLIError.runtime("net: bind(\(localPath)) failed") }
+        let conn = withUnsafePointer(to: &remote) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+        }
+        guard conn == 0 else { close(fd); throw CLIError.runtime("net: connect(\(gvproxyPath)) failed — is gvproxy up?") }
+        var buf: Int32 = 4 * 1024 * 1024
+        setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf, socklen_t(MemoryLayout<Int32>.size))
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf, socklen_t(MemoryLayout<Int32>.size))
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        return VZFileHandleNetworkDeviceAttachment(fileHandle: handle)
+    }
+
+    private static func makeNAT() -> VZVirtioNetworkDeviceConfiguration {
+        let net = VZVirtioNetworkDeviceConfiguration()
+        net.attachment = VZNATNetworkDeviceAttachment()
+        // Pin a stable MAC. Without this, VZ hands the NIC a fresh random MAC on
+        // every boot — but cloud-init's netplan matches the NIC by MAC, so on a
+        // reused disk the new MAC wouldn't match, the interface went unmanaged,
+        // and the guest had no network. A fixed (locally-administered) MAC keeps
+        // networking working across reboots.
+        if let mac = VZMACAddress(string: "0a:00:27:0b:00:01") {
+            net.macAddress = mac
+        }
+        return net
+    }
+
+    private static func makeConsole() -> VZVirtioConsoleDeviceSerialPortConfiguration {
+        let port = VZVirtioConsoleDeviceSerialPortConfiguration()
+        port.attachment = VZFileHandleSerialPortAttachment(
+            fileHandleForReading: FileHandle.standardInput,
+            fileHandleForWriting: FileHandle.standardOutput
+        )
+        return port
+    }
+
+    private static func makeConsoleToFile(_ url: URL) throws -> VZVirtioConsoleDeviceSerialPortConfiguration {
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        guard let handle = FileHandle(forWritingAtPath: url.path) else {
+            throw CLIError.runtime("cannot open console log: \(url.path)")
+        }
+        let port = VZVirtioConsoleDeviceSerialPortConfiguration()
+        port.attachment = VZFileHandleSerialPortAttachment(fileHandleForReading: nil, fileHandleForWriting: handle)
+        return port
+    }
+
+    // MARK: - Clamping
+
+    private static func clampCPU(_ requested: Int) -> Int {
+        let lo = VZVirtualMachineConfiguration.minimumAllowedCPUCount
+        let hi = VZVirtualMachineConfiguration.maximumAllowedCPUCount
+        return min(max(requested, lo), hi)
+    }
+
+    private static func clampMemory(_ requested: UInt64) -> UInt64 {
+        let lo = VZVirtualMachineConfiguration.minimumAllowedMemorySize
+        let hi = VZVirtualMachineConfiguration.maximumAllowedMemorySize
+        return min(max(requested, lo), hi)
+    }
+}

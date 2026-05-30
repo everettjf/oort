@@ -1,0 +1,175 @@
+# CLI Reference
+
+[**English**](./cli-reference.md) | [简体中文](./cli-reference.zh-CN.md)
+
+Every `oort` subcommand, plus all flags of the underlying engine `oort run`.
+
+## `oort` — the front-end
+
+`oort` is a thin wrapper around `oort run` that codifies common launch flags and adds
+lifecycle / exec / passthrough conveniences.
+
+| Command | Description |
+|---|---|
+| `oort start` | Boot the VM (Docker + file sharing + Rosetta + port forwarding); wait until Docker is ready and print `DOCKER_HOST` |
+| `oort stop` | Cleanly shut the VM down |
+| `oort restart` | stop then start |
+| `oort status` | Show VM and Docker status |
+| `oort exec <cmd...>` | Run a command in the guest (via the vsock agent) |
+| `oort shell` | Simple line-at-a-time guest shell |
+| `oort docker <args...>` | Run `docker` against the oort daemon |
+| `oort env` | Print `export DOCKER_HOST=...`; use `eval "$(oort env)"` |
+| `oort logs` | Tail the guest console log |
+| `oort build-image` | (Re)build the boot disk + cloud-init seed + cross-compile the agent |
+| `oort reset` | Restore the disk from the golden snapshot |
+| `oort route enable\|disable` | Reach containers by their docker0 IP from macOS (sudo) |
+| `oort k8s enable\|disable` | Run Kubernetes (k3s) in the guest |
+| `oort machine ...` | Manage named Linux machines (see below) |
+| `oort up [file]` | Bring up machines declared in `oort.yaml`/`.json` (env-as-code); runs each machine's one-time `setup` |
+| `oort down [file]` | Tear those machines down (`--purge` also drops their snapshots) |
+| `oort mcp` | Run the MCP server (stdio): oort sandboxes as tools for AI agents — see [`mcp/`](../mcp/README.md) |
+| `oort gui` | Launch the native menu-bar app |
+| `oort help` | Show help |
+
+### `oort machine` — named Linux machines + time-travel
+
+Machines are persistent, multi-distro environments you shell into (OrbStack's
+"machines"), backed by long-lived containers on the shared guest kernel. Because
+a machine is just a container, its whole filesystem is a content-addressed image
+— so oort can **snapshot, roll back and fork** an environment, which OrbStack
+cannot. "git for dev environments."
+
+| Command | Description |
+|---|---|
+| `oort machine create <name> [distro]` | Create a machine (default distro `ubuntu`) |
+| `oort machine list` | List machines |
+| `oort machine shell <name>` | Interactive shell into a machine |
+| `oort machine exec <name> <cmd...>` | Run a command in a machine |
+| `oort machine delete <name> [--purge]` | Delete the machine; `--purge` also drops its snapshots |
+| `oort machine snapshot <name> [tag]` | Commit the machine's live state to a tagged image (tag defaults to a timestamp) |
+| `oort machine snapshots <name>` | List a machine's snapshots |
+| `oort machine restore <name> [tag]` | Roll a machine back to a snapshot (newest if no tag) |
+| `oort machine fork <src> <newname>` | **Instantly branch** a fully-set-up machine into a new one (CoW, no re-provisioning) |
+
+```bash
+oort machine create devbox ubuntu
+oort machine exec devbox apt-get install -y …      # configure it
+oort machine snapshot devbox clean-baseline        # checkpoint
+# … experiment, maybe break things …
+oort machine restore devbox clean-baseline         # roll back
+oort machine fork devbox feature-x                 # branch into a parallel env
+```
+
+### Examples
+
+```bash
+./oort build-image
+./oort start
+eval "$(./oort env)"
+
+docker run --rm hello-world
+oort docker ps
+oort exec 'free -m'
+oort status
+oort stop
+```
+
+### Environment variables
+
+`oort` lets you override default paths:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OORT_DISK` | `./images/disk.img` | boot disk path |
+| `OORT_SEED` | `./images/seed.img` | cloud-init seed path |
+| `OORT_SHARE` | `./share` | directory shared into the guest (tag `mac`) |
+
+Host-side state lives under `~/.oort/`:
+
+| File | Purpose |
+|---|---|
+| `~/.oort/docker.sock` | projected Docker socket (`DOCKER_HOST` points here) |
+| `~/.oort/agent.sock` | exec agent (used by `oort exec`, forwarded to vsock 2376) |
+| `~/.oort/console.log` | guest console log |
+| `~/.oort/vm.pid` / `vm.log` | VM process PID / log |
+
+---
+
+## `oort run` — the engine
+
+This is what `oort` ultimately invokes. Use it directly for full control (first
+`swift build -c release` and codesign, or use `./run.sh`).
+
+```
+oort run --disk <path> [options]
+```
+
+### Boot
+
+| Flag | Description |
+|---|---|
+| `--disk <path>` | Bootable raw disk image (required) |
+| `--seed <path>` | Extra read-only disk, e.g. a cloud-init CIDATA image |
+| `--nvram <path>` | EFI variable store path (default `<disk>.nvram`) |
+| `--kernel <path>` | Direct-kernel boot image (switches to `VZLinuxBootLoader`, disables EFI) |
+| `--initrd <path>` | initramfs for direct-kernel boot (optional) |
+| `--cmdline <string>` | Kernel command line (default `console=hvc0 root=/dev/vda rw`) |
+
+### Resources
+
+| Flag | Description |
+|---|---|
+| `--cpus <n>` | vCPU count (default 4) |
+| `--memory <GiB>` | Memory in GiB (default 4) |
+
+### File sharing (VirtioFS)
+
+| Flag | Description |
+|---|---|
+| `--mount <hostdir>[:tag][:ro]` | Share a host dir into the guest via VirtioFS (repeatable). First one's default tag is `mac`; the guest mounts at `/mnt/<tag>`. Add `:ro` for read-only |
+| `--rosetta` | Share Rosetta so x86-64 images run via translation (installs Rosetta on demand) |
+
+### Docker projection / forwarding
+
+| Flag | Description |
+|---|---|
+| `--socket <path>` | Host Docker Unix socket (default `~/.oort/docker.sock`) |
+| `--vsock-port <n>` | Guest vsock port serving dockerd (default 2375) |
+| `--forward <sock>:<port>` | Extra host-socket ⇄ guest-vsock-port forward (repeatable, e.g. expose the agent at `~/.oort/agent.sock:2376`) |
+| `--no-port-forward` | Disable auto-forwarding container ports to localhost |
+
+### Misc
+
+| Flag | Description |
+|---|---|
+| `--no-console` | Don't attach the guest serial to stdio |
+| `--console-log <path>` | Write the guest console to a file (headless) |
+| `-h`, `--help` | Show help |
+
+### Equivalent
+
+`oort start` is roughly equivalent to:
+
+```bash
+oort run \
+  --disk images/disk.img --seed images/seed.img \
+  --mount "$PWD/share:mac" --rosetta \
+  --forward "$HOME/.oort/agent.sock:2376" \
+  --no-console --console-log "$HOME/.oort/console.log" \
+  --socket "$HOME/.oort/docker.sock"
+```
+
+---
+
+## Guest vsock ports
+
+`oort-guest` (the Go agent) listens inside the guest on:
+
+| vsock port | Service |
+|---|---|
+| 2375 | Docker bridge (→ `/run/docker.sock`) |
+| 2376 | exec (`oort exec` / `oort shell`) |
+| 2377 | TCP port forwarding |
+
+The host can only reach these through the `VZVirtioSocketDevice` owned by the oort process,
+so they're exposed via `--forward` or the built-in proxy.
