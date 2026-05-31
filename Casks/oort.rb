@@ -5,7 +5,7 @@
 # fully standalone app"), this distributes the GUI front-end; the engine still
 # needs a local install. Provided as a template for when that lands.
 cask "oort" do
-  version "0.3.8"
+  version "0.1.0"
   sha256 :no_check # replace with the notarized DMG's sha256
 
   url "https://github.com/everettjf/oort/releases/download/v#{version}/oort-#{version}.dmg"
