@@ -36,6 +36,20 @@ engine even when dragged to `/Applications`. You still need that repo present an
 golden image built (`oort build-image`). So today's `.dmg` distributes the GUI, not
 a one-click, self-contained product.
 
+### Install the GUI via Homebrew
+
+A Developer ID-signed, notarized + stapled `.dmg` ships as an asset on the
+[v0.1.0 release](https://github.com/everettjf/oort/releases/tag/v0.1.0), and a cask
+lives in [`everettjf/homebrew-tap`](https://github.com/everettjf/homebrew-tap):
+
+```bash
+brew install --cask everettjf/tap/oort     # → /Applications/oort.app
+```
+
+Same caveat as above: this installs the **GUI front-end**, which drives a local
+oort install — after `brew install` you still need the repo cloned and a golden
+image built (`oort build-image`). It is not yet a standalone product (see below).
+
 ## Path to a fully standalone app (future)
 
 To ship a single notarized `.app` a user can just open:
