@@ -33,6 +33,13 @@ orbit one shared kernel.*
 `oort` is a **working**, slimmed-down OrbStack clone — a project that studies *why OrbStack is
 fast and light* and reimplements the core mechanisms by hand.
 
+> **Oort vs Docker?** They're at different layers. **Docker** is the container engine — but
+> containers need a Linux kernel, which macOS doesn't have. **Oort** is the substrate that gives
+> Docker that kernel: it boots a lightweight Linux VM and projects `dockerd` (plus ports, files,
+> DNS, x86 translation) back onto macOS, so the stock `docker` CLI just works. Oort doesn't
+> replace Docker — it carries it. Compare it to **Docker Desktop / OrbStack / Colima**, not to
+> Docker itself. ([more →](./docs/faq.md#concepts))
+
 One command to start, then the stock `docker` CLI just works:
 
 ```console

@@ -2,6 +2,37 @@
 
 [English](./faq.md) | **简体中文**
 
+## 概念
+
+### Oort 和 Docker 是一回事吗？
+不是。它们处在**不同层次**——Oort 不替代 Docker，而是**承载并增强**它。
+
+- **Docker** 是容器引擎（`dockerd` + `docker` CLI），负责打包、运行容器；但容器要跑必须有
+  **Linux 内核**。macOS 没有 Linux 内核，所以 Docker 在裸 Mac 上根本跑不起来。
+- **Oort** 就是给 Docker 提供那个内核的底座：用 Apple 的 `Virtualization.framework` 启动一台
+  轻量 Linux VM，在里面跑 `dockerd`，再把引擎、端口、文件、DNS、x86 翻译统统投影回 macOS——
+  于是原版 `docker` CLI「直接就能用」。
+
+`oort start` 之后，你敲的命令依然是普通的 `docker run …`。Oort 是底下的运行时 + 适配层，
+不是 Docker 的替代品。
+
+> 类比：**Docker** 是应用程序；**Oort** 是让它能在 Mac 上跑起来的运行环境 + 胶水层。
+
+### 那 Oort 到底该和谁比？
+不是 Docker，而是其它 **Docker-on-Mac 后端**：**Docker Desktop**、**OrbStack**、**Colima**。
+它们和 Oort 同一层（启动 Linux VM、把 Docker 暴露给 Mac）。
+
+| | 角色 |
+|---|---|
+| **Oort** | 启动轻量 Linux VM，把里面的 `dockerd` 投影到 Mac socket；你照常用原版 `docker` CLI。开源。 |
+| **Docker Desktop** | 官方后端——同样是一台 VM，但更重、商用收费。 |
+| **OrbStack** | 闭源、商业、快而轻。**Oort 就是它的开源复刻。** |
+| **Colima** | 开源，基于 Lima/QEMU；思路相近，管线不同。 |
+
+除了「跑 Docker」，Oort 还做了引擎本身做不到的事——比如**机器级时间旅行**（`snapshot` /
+`restore` / `fork` 整台 Linux 机器），这是连 OrbStack 都没有的。见
+[Beyond OrbStack](./beyond-orbstack.zh-CN.md)。
+
 ## 安装与构建
 
 ### `swift build` 报 PCH / module cache 路径错误

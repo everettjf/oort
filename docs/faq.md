@@ -2,6 +2,41 @@
 
 [**English**](./faq.md) | [简体中文](./faq.zh-CN.md)
 
+## Concepts
+
+### Oort vs Docker — aren't they the same thing?
+No. They live at **different layers**, and Oort doesn't replace Docker — it *carries and
+augments* it.
+
+- **Docker** is the container engine (`dockerd` + the `docker` CLI). It packages and runs
+  containers, but containers need a **Linux kernel** to run. macOS has no Linux kernel, so
+  Docker can never run on the bare Mac.
+- **Oort** is the substrate that gives Docker that kernel: it boots a lightweight Linux VM with
+  Apple's `Virtualization.framework`, runs `dockerd` inside it, and projects the engine, ports,
+  files, DNS and x86 translation back onto macOS — so the stock `docker` CLI "just works".
+
+After `oort start`, the commands you type are still plain `docker run …`. Oort is the
+runtime + adapter layer underneath, not a Docker alternative.
+
+> Analogy: **Docker** is the application; **Oort** is the environment + glue that lets it run on
+> a Mac at all.
+
+### So what should I actually compare Oort to?
+Not Docker — compare it to the other **Docker-on-Mac backends**: **Docker Desktop**,
+**OrbStack**, and **Colima**. They occupy the same layer Oort does (boot a Linux VM, expose
+Docker to the Mac).
+
+| | Role |
+|---|---|
+| **Oort** | Boots a lightweight Linux VM, projects its `dockerd` onto a Mac socket; you keep using the stock `docker` CLI. Open source. |
+| **Docker Desktop** | The official backend — also a VM, but heavier and commercially licensed. |
+| **OrbStack** | Closed-source, commercial, fast & light. **Oort is an open clone of it.** |
+| **Colima** | Open-source Lima/QEMU-based backend; similar idea, different plumbing. |
+
+Beyond just running Docker, Oort adds things the engine itself can't do — e.g. **machine-level
+time-travel** (`snapshot` / `restore` / `fork` a whole Linux machine), which even OrbStack
+doesn't have. See [Beyond OrbStack](./beyond-orbstack.md).
+
 ## Install & build
 
 ### `swift build` errors about PCH / module cache path
