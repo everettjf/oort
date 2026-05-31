@@ -1,12 +1,13 @@
-# Homebrew cask stub for oort's GUI. Publish a notarized DMG as a GitHub
-# release asset (see docs/packaging.md), then fill in the version + sha256.
+# Homebrew cask for oort's GUI, published from the v0.1.0 GitHub release
+# (a Developer ID-signed, notarized + stapled DMG — see docs/packaging.md).
 #
-# Until oort ships a fully self-contained app (see docs/packaging.md "Path to a
-# fully standalone app"), this distributes the GUI front-end; the engine still
-# needs a local install. Provided as a template for when that lands.
+# NOTE: today's .app is a front-end that drives a *local* oort install — it
+# bakes OORT_HOME to the repo it was built from, so after `brew install` you
+# still need that repo cloned and a golden image built (`oort build-image`).
+# A fully self-contained app is on the roadmap (docs/packaging.md).
 cask "oort" do
   version "0.1.0"
-  sha256 :no_check # replace with the notarized DMG's sha256
+  sha256 "fbcdfae0b0156750cc340a58d1f0f294c57826ec478931af416dae1cbe54f970"
 
   url "https://github.com/everettjf/oort/releases/download/v#{version}/oort-#{version}.dmg"
   name "oort"
