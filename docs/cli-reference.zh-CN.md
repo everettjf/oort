@@ -21,7 +21,9 @@
 | `oort env` | 打印 `export DOCKER_HOST=...`，可 `eval "$(oort env)"`——通常不再需要：`oort start` 会注册 **`oort` docker context** 并在当前 context 为 `default` 或已死时自动选中，原生 `docker` CLI 直接可用（`oort stop` 恢复原 context；注意已导出的 `DOCKER_HOST` 优先级高于 context） |
 | `oort logs` | tail 客户机控制台日志 |
 | `oort build-image` | （重新）构建启动盘 + cloud-init seed + 编译客户机 agent |
-| `oort domains enable\|route\|disable` | `*.oort.local` 域名直达容器/机器（需 sudo，见下） |
+| `oort net install\|uninstall\|status` | 一次性 root helper（仅此一次 sudo）：之后路由和 `*.oort.local` 全自动，再不需要 sudo |
+| `oort debug <容器> [命令...]` | 工具箱 shell 进入**任意**容器（包括 distroless）：busybox 加入目标的 pid+net 命名空间，目标根文件系统在 `/proc/1/root` |
+| `oort domains enable\|route\|disable` | `*.oort.local` 域名直达容器/机器（见下） |
 | `oort help` | 显示帮助 |
 
 ### `oort domains` —— `*.oort.local` 域名（对标 OrbStack 的 `*.orb.local`）

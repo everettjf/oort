@@ -4,6 +4,29 @@ All notable changes to Oort. Dates are YYYY-MM-DD.
 
 ## Unreleased
 
+- **`oort debug <container>` — toolbox shell into ANY container** (OrbStack's
+  `orb debug`): a busybox toolbox joins the target's pid+net namespaces, so
+  distroless/shell-less containers get ps/netstat/wget/vi against the live
+  process; the target's root filesystem is at `/proc/1/root`. Run a one-shot
+  command (`oort debug web 'cat /proc/1/root/etc/nginx/nginx.conf'`) or get an
+  interactive shell.
+- **Fix: `docker run`/`exec`/attach output was lost through the projected
+  socket** — `docker run --rm alpine echo hi` printed nothing. Both relay ends
+  (host proxy and guest agent) tore down the whole connection on the FIRST
+  EOF, racing the hijacked attach stream's reply. Both now propagate
+  half-closes properly.
+- **Fix: one stalled docker client could freeze the whole VM's I/O.** VZ
+  delivers every vsock connection through ONE serial device queue that does a
+  blocking `writev` into the connection's host fd (verified by sampling the
+  Virtualization XPC process mid-wedge). A client that stopped reading — e.g.
+  `docker run … | head -1` — filled its socket buffer, blocked that queue, and
+  froze docker, the agent and all port forwards until restart. The guest→host
+  relay direction is now a poll-based pump that ALWAYS drains the vsock fd,
+  buffering up to 32 MiB toward a slow client and killing only that connection
+  on overflow. Verified: 5 concurrent vanish-mid-stream clients plus a 50 MB
+  flood into a never-reading pipe leave Docker fully responsive. (Also ignore
+  SIGPIPE engine-wide — a relay writing to a vanished peer used to kill the
+  whole engine.)
 - **Sudo-free networking — `oort net install`.** A one-time-installed root
   LaunchDaemon (the privileged-helper pattern OrbStack uses) watches
   `~/.oort/net-request` and applies exactly two strictly-validated operations:

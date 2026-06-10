@@ -21,6 +21,7 @@
 #   oort route enable|disable  reach containers by their docker0 IP
 #   oort domains enable|disable  *.oort.local names for containers/machines
 #   oort k8s enable|disable    run Kubernetes (k3s) in the guest
+#   oort debug <container>     toolbox shell into ANY container (even distroless)
 #   oort machine ...           manage named Linux machines (create/list/shell/…)
 #   oort machine snapshot/restore/fork   time-travel: branch & roll back an env
 #   oort fastvol <name> [path] fast guest-disk volume for a hot dir (node_modules…)
@@ -693,6 +694,33 @@ cmd_machine() {
   esac
 }
 
+# Debug shell into ANY container (M9) — OrbStack's `orb debug`, for oort.
+# Distroless/minimal images have no shell or tools; this drops you into a
+# busybox toolbox that JOINS the target's pid+net namespaces, so you get ps,
+# netstat, wget, vi… against the live container. The target's root filesystem
+# is at /proc/1/root (the toolbox sees the target's pid 1).
+cmd_debug() {
+  local name="${1:?usage: oort debug <container> [cmd...]}"; shift || true
+  local state; state="$(cmd_docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null)" \
+    || { echo "no container '$name'"; exit 1; }
+  [ "$state" = running ] || { echo "container '$name' is $state — start it first"; exit 1; }
+  cmd_docker image inspect busybox:latest >/dev/null 2>&1 \
+    || cmd_docker pull --platform linux/arm64 busybox:latest >/dev/null
+  local tty=(); [ -t 0 ] && [ $# -eq 0 ] && tty=(-it)
+  local entry
+  if [ $# -gt 0 ]; then
+    entry="$*"
+  else
+    entry='echo "oort debug: busybox toolbox in '"$name"'\\'"'"'s namespaces — target rootfs at /proc/1/root"; exec sh'
+  fi
+  # SYS_PTRACE lets the toolbox read /proc/<target pids>/root across the
+  # shared pid namespace; net namespace gives netstat/wget the target's view.
+  cmd_docker run --rm ${tty[@]+"${tty[@]}"} \
+    --pid "container:$name" --network "container:$name" \
+    --cap-add SYS_PTRACE --platform linux/arm64 \
+    busybox:latest sh -c "$entry"
+}
+
 # Kubernetes via k3s in the guest (M6). Installs k3s, projects its API server
 # (guest 127.0.0.1:6443) onto the Mac's localhost:6443 (static tcp-forward), and
 # writes a kubeconfig. `oort start` adds the 6443 forward whenever k8s is enabled.
@@ -928,6 +956,7 @@ case "${1:-help}" in
   net)          shift; cmd_net "$@";;
   domains)      shift; cmd_domains "$@";;
   k8s)          shift; cmd_k8s "$@";;
+  debug)        shift; cmd_debug "$@";;
   machine)      shift; cmd_machine "$@";;
   up)           shift; cmd_up "$@";;
   down)         shift; cmd_down "$@";;
