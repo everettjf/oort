@@ -2,7 +2,11 @@
 
 All notable changes to Oort. Dates are YYYY-MM-DD.
 
-## Unreleased
+## v0.2.0 — 2026-06-09
+
+The "daily-driver" release: instant resume, container domains with trusted
+HTTPS, zero-config docker CLI, sudo-free networking, debug-anything — plus two
+deep streaming fixes in the docker projection.
 
 - **Suspend/resume hardening.** The stale-state guard now stamps the disk's
   post-suspend mtime and requires an exact match (the old `-nt` comparison
