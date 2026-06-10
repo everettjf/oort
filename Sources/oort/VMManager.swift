@@ -11,6 +11,7 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
     private var proxies: [DockerSocketProxy] = []
     private var portForwarder: PortForwarder?
     private var memoryManager: MemoryManager?
+    private var dnsResponder: DNSResponder?
     private var configuredMemory: UInt64 = 0
     private var diskLock: DiskLock?
 
@@ -76,6 +77,12 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
                                    socketDevice: device, staticPorts: cfg.tcpForwards)
             pf.start()
             portForwarder = pf
+        }
+
+        if cfg.dnsPort > 0 {
+            let dns = DNSResponder(dockerSocketPath: cfg.hostSocketPath, port: cfg.dnsPort)
+            dns.start()
+            dnsResponder = dns
         }
 
         if cfg.dynamicMemory,

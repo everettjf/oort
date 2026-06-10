@@ -19,7 +19,11 @@ ok()   { PASS=$((PASS+1)); printf "  \033[32mPASS\033[0m %s\n" "$1"; }
 bad()  { FAIL=$((FAIL+1)); FAILED+=("$2"); printf "  \033[31mFAIL\033[0m %s\n" "$1"; }
 check(){ if [ "$1" = "$2" ]; then ok "$3"; else bad "$3 (got: $1)" "$3"; fi; }
 gx()   { "$ORB" exec "$@" 2>/dev/null; }                 # run in guest
-gdock(){ "$ORB" exec docker "$@" 2>/dev/null; }          # docker in guest
+# docker in guest. %q-quote each argv (like `oort machine exec` does): the agent
+# re-parses the request body via /bin/sh -c, which otherwise flattens quoting —
+# `gdock run ... sh -c 'wget …'` would run the wget on the GUEST, not in the
+# container (and the guest no longer ships wget, so those probes went dark).
+gdock(){ local q; printf -v q '%q ' docker "$@"; "$ORB" exec "$q" 2>/dev/null; }
 
 echo "════════ oort e2e ════════"
 
@@ -88,14 +92,38 @@ check "$(gdock run --rm --platform linux/amd64 alpine uname -m)" "x86_64" "Roset
 gdock pull --platform linux/arm64 alpine >/dev/null 2>&1
 
 echo "── M3-stage port forwarding ──────────────────"
+# busybox:latest, not alpine: alpine ≥3.20 dropped httpd from its busybox
+# (moved to busybox-extras), so the alpine httpd one-liner dies instantly and
+# the port never publishes — a false negative on the forwarder.
 gdock rm -f e2eweb >/dev/null 2>&1
-gdock run -d --name e2eweb -p 18080:80 --platform linux/arm64 alpine sh -c 'mkdir -p /w; echo PFOK>/w/i; exec httpd -f -p 80 -h /w' >/dev/null 2>&1
+gdock run -d --name e2eweb -p 18080:80 --platform linux/arm64 busybox:latest sh -c 'mkdir -p /w; echo PFOK>/w/i; exec httpd -f -p 80 -h /w' >/dev/null 2>&1
 # Wait for the container to actually reach "running" before probing (a busy host
 # can take a few seconds to start it), then poll the forwarded port.
 for _ in $(seq 1 10); do [ "$(gdock inspect -f '{{.State.Status}}' e2eweb 2>/dev/null)" = running ] && break; sleep 1; done
 r=""; for _ in $(seq 1 8); do r=$(curl -s --max-time 3 http://127.0.0.1:18080/i 2>/dev/null); [ -n "$r" ] && break; sleep 2; done
 check "$r" "PFOK" "port forward → localhost"
 gdock rm -f e2eweb >/dev/null 2>&1
+
+echo "── M7 *.oort.local domains ───────────────────"
+# The engine's DNS responder (127.0.0.1:5354) — testable without sudo or the
+# /etc/resolver file by querying it directly. Reachability (route) is covered
+# by `oort domains enable`, which needs sudo and stays manual.
+# busybox is baked into the golden, so this works even on a bad-egress boot.
+gdock rm -f e2edns >/dev/null 2>&1
+gdock run -d --name e2edns --platform linux/arm64 busybox:latest sleep 300 >/dev/null 2>&1
+for _ in $(seq 1 10); do [ "$(gdock inspect -f '{{.State.Status}}' e2edns 2>/dev/null)" = running ] && break; sleep 1; done
+cip=$(gdock inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' e2edns 2>/dev/null)
+# Retry until dig matches: the responder caches the container table for ~2s.
+r=""; for _ in $(seq 1 8); do r=$(dig +short +time=2 +tries=1 @127.0.0.1 -p 5354 e2edns.oort.local 2>/dev/null); [ -n "$r" ] && [ "$r" = "$cip" ] && break; sleep 1; done
+check "$r" "$cip" "container name → bridge IP (DNS responder)"
+check "$(dig +short +time=2 +tries=1 @127.0.0.1 -p 5354 nosuch.oort.local 2>/dev/null | wc -l | tr -d ' ')" "0" "unknown name → NXDOMAIN"
+"$ORB" machine create e2edm busybox:latest >/dev/null 2>&1
+for _ in $(seq 1 10); do [ "$(gdock inspect -f '{{.State.Status}}' ovm-e2edm 2>/dev/null)" = running ] && break; sleep 1; done
+mip=$(gdock inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ovm-e2edm 2>/dev/null)
+r2=""; for _ in $(seq 1 8); do r2=$(dig +short +time=2 +tries=1 @127.0.0.1 -p 5354 e2edm.oort.local 2>/dev/null); [ -n "$r2" ] && [ "$r2" = "$mip" ] && break; sleep 1; done
+check "$r2" "$mip" "machine name (prefix-stripped) resolves"
+"$ORB" machine delete e2edm >/dev/null 2>&1
+gdock rm -f e2edns >/dev/null 2>&1
 
 echo "── M5 DNS-following ──────────────────────────"
 gx 'grep -q nameserver /etc/resolv.conf && echo y || echo n' | grep -q y && ok "guest resolv.conf populated" || bad "guest resolv.conf" "dns-follow"

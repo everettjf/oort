@@ -17,6 +17,7 @@
 #   oort build-kernel          build a custom minimal kernel in the guest, use it for direct boot
 #   oort reset                 restore the disk from the golden snapshot
 #   oort route enable|disable  reach containers by their docker0 IP (sudo)
+#   oort domains enable|disable  *.oort.local names for containers/machines (sudo)
 #   oort k8s enable|disable    run Kubernetes (k3s) in the guest
 #   oort machine ...           manage named Linux machines (create/list/shell/…)
 #   oort machine snapshot/restore/fork   time-travel: branch & roll back an env
@@ -124,6 +125,7 @@ cmd_start() {
   [ "${MOUNT_HOME:-0}" = 1 ] && mounts+=(--mount "$HOME:home")
   local extra=()
   [ -f "$K8S_MARKER" ] && extra+=(--tcp-forward 6443)   # project the k3s API
+  extra+=(--dns-port "$DNS_PORT")   # *.oort.local resolver (OORT_DNS_PORT; 0 disables)
   # Direct-kernel boot (M2): if a kernel Image is staged, boot it straight via VZ's
   # VZLinuxBootLoader — skipping the EFI firmware + GRUB stage for a faster cold
   # start. Falls back to EFI automatically when the artifact is absent, or when
@@ -179,6 +181,11 @@ cmd_start() {
       echo " ready."
       [ "${MOUNT_HOME:-0}" = 1 ] && mount_home
       if [ "${OORT_NET:-}" = gvproxy ]; then sync_dns_gvproxy; else sync_dns; fi
+      # *.oort.local needs the container route, and the guest IP can change
+      # across boots — remind rather than demand sudo mid-start.
+      if [ -f "$DOMAINS_MARKER" ] && ! _route_ok; then
+        echo "(*.oort.local: container route missing — run 'oort domains route')"
+      fi
       echo; cmd_env; return 0
     fi
     printf "."; sleep 0.5
@@ -621,21 +628,71 @@ cmd_k8s() {
 # already reach the guest IP over VZ NAT; this adds a route so 172.17.0.0/16
 # (Docker's default bridge) goes via the guest, which forwards to the container.
 # NOTE: needs sudo for `route`; re-run after a restart (the guest IP can change).
+_guest_ip() {
+  curl -s --max-time 8 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
+    'ip -4 -o addr show enp0s1 | grep -oE "192\.168\.[0-9]+\.[0-9]+" | head -1' http://localhost/ 2>/dev/null
+}
+
+_route_ok() { netstat -rn -f inet 2>/dev/null | grep -q '^172\.17[./]'; }
+
+_route_add() {
+  vm_running || { echo "start oort first ('oort start')"; exit 1; }
+  local gip; gip="$(_guest_ip)"
+  [ -n "$gip" ] || { echo "couldn't read the guest IP (is the agent up?)"; exit 1; }
+  echo "routing 172.17.0.0/16 via the guest ($gip) — sudo required:"
+  # Replace any stale route first (the guest IP can change across boots).
+  sudo route -n delete -net 172.17.0.0/16 >/dev/null 2>&1 || true
+  sudo route -n add -net 172.17.0.0/16 "$gip" >/dev/null && \
+    echo "done — containers are now reachable by their docker0 IP from macOS."
+}
+
 cmd_route() {
   case "${1:-}" in
-    enable)
-      vm_running || { echo "start oort first ('oort start')"; exit 1; }
-      local gip; gip="$(curl -s --max-time 8 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
-        'ip -4 -o addr show enp0s1 | grep -oE "192\.168\.[0-9]+\.[0-9]+" | head -1' http://localhost/ 2>/dev/null)"
-      [ -n "$gip" ] || { echo "couldn't read the guest IP (is the agent up?)"; exit 1; }
-      echo "routing 172.17.0.0/16 via the guest ($gip) — sudo required:"
-      sudo route -n add -net 172.17.0.0/16 "$gip" && \
-        echo "done — containers are now reachable by their docker0 IP from macOS."
-      ;;
+    enable) _route_add;;
     disable)
       sudo route -n delete -net 172.17.0.0/16 2>/dev/null && echo "route removed" || echo "no route to remove"
       ;;
     *) echo "usage: oort route enable|disable";;
+  esac
+}
+
+# `*.oort.local` domains (M7) — OrbStack's `*.orb.local`, for oort. The engine
+# already runs a tiny DNS server on 127.0.0.1:5354 answering for containers,
+# machines, and compose services. `enable` points macOS's resolver at it with a
+# domain-scoped /etc/resolver file (sudo, one-time) and adds the container
+# route, so `curl http://web.oort.local` reaches any container port directly.
+DOMAINS_MARKER="$STATE/domains-enabled"
+RESOLVER_FILE="/etc/resolver/oort.local"
+DNS_PORT="${OORT_DNS_PORT:-5354}"
+cmd_domains() {
+  case "${1:-status}" in
+    enable)
+      vm_running || { echo "start oort first ('oort start')"; exit 1; }
+      echo "pointing macOS at the oort resolver ($RESOLVER_FILE) — sudo required:"
+      printf 'nameserver 127.0.0.1\nport %s\n' "$DNS_PORT" | sudo tee "$RESOLVER_FILE" >/dev/null
+      _route_add
+      touch "$DOMAINS_MARKER"
+      echo "domains enabled — containers and machines are reachable by name:"
+      echo "  docker run -d --name web nginx && curl http://web.oort.local"
+      echo "  oort machine create dev      && ping dev.oort.local"
+      echo "(the route follows the guest IP; rerun 'oort domains route' if a"
+      echo " restart changes it — 'oort start' will remind you)"
+      ;;
+    route) _route_add;;
+    disable)
+      sudo rm -f "$RESOLVER_FILE"
+      sudo route -n delete -net 172.17.0.0/16 >/dev/null 2>&1 || true
+      rm -f "$DOMAINS_MARKER"
+      echo "domains disabled (resolver file and route removed)"
+      ;;
+    *)
+      if [ -f "$RESOLVER_FILE" ]; then
+        printf 'domains: enabled (%s' "$RESOLVER_FILE"
+        _route_ok && printf ', route ok)\n' || printf ', route MISSING — run "oort domains route")\n'
+      else
+        echo "domains: disabled (use 'oort domains enable')"
+      fi
+      ;;
   esac
 }
 
@@ -687,6 +744,7 @@ case "${1:-help}" in
   build-kernel) shift; cmd_build_kernel "$@";;
   reset)        shift; cmd_reset "$@";;
   route)        shift; cmd_route "$@";;
+  domains)      shift; cmd_domains "$@";;
   k8s)          shift; cmd_k8s "$@";;
   machine)      shift; cmd_machine "$@";;
   up)           shift; cmd_up "$@";;

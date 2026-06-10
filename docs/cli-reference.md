@@ -23,6 +23,7 @@ lifecycle / exec / passthrough conveniences.
 | `oort build-image` | (Re)build the boot disk + cloud-init seed + cross-compile the agent |
 | `oort reset` | Restore the disk from the golden snapshot |
 | `oort route enable\|disable` | Reach containers by their docker0 IP from macOS (sudo) |
+| `oort domains enable\|route\|disable` | `*.oort.local` names for containers/machines/compose services (sudo, see below) |
 | `oort k8s enable\|disable` | Run Kubernetes (k3s) in the guest |
 | `oort machine ...` | Manage named Linux machines (see below) |
 | `oort up [file]` | Bring up machines declared in `oort.yaml`/`.json` (env-as-code); runs each machine's one-time `setup` |
@@ -59,6 +60,32 @@ oort machine snapshot devbox clean-baseline        # checkpoint
 oort machine restore devbox clean-baseline         # roll back
 oort machine fork devbox feature-x                 # branch into a parallel env
 ```
+
+### `oort domains` — `*.oort.local` names (OrbStack's `*.orb.local`)
+
+The engine runs a tiny DNS responder on `127.0.0.1:5354` (UDP; `OORT_DNS_PORT` /
+`--dns-port` to change, `0` disables). It answers from the live Docker state:
+
+| Name | Resolves to |
+|---|---|
+| `<container>.oort.local` | that container's bridge IP |
+| `<machine>.oort.local` | the machine's container (`ovm-` prefix stripped) |
+| `<service>.<project>.oort.local` | a compose service's container |
+
+`oort domains enable` (sudo, one-time) writes `/etc/resolver/oort.local` so macOS
+sends only `*.oort.local` queries there, and adds the `172.17.0.0/16 → guest`
+route — after that, **any** container port is reachable by name, no `-p` needed:
+
+```bash
+oort domains enable
+docker run -d --name web nginx
+curl http://web.oort.local            # no published port required
+```
+
+The route follows the guest IP, which can change across VM restarts —
+`oort start` prints a reminder and `oort domains route` refreshes it (sudo).
+`oort domains` alone shows status; `disable` removes the resolver file + route.
+Note: requires the default VZ NAT networking (not `OORT_NET=gvproxy`).
 
 ### Examples
 

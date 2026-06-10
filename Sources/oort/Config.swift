@@ -36,6 +36,9 @@ struct Config {
     var tcpForwards: [Int]
     /// Active memory ballooning: return idle guest memory to macOS (M3).
     var dynamicMemory: Bool
+    /// `*.oort.local` DNS responder for container/machine domains (M7).
+    /// 0 disables; macOS dispatches the queries via /etc/resolver/oort.local.
+    var dnsPort: UInt16
     /// vsock port inside the guest where dockerd is exposed (see guest/ setup).
     var guestVsockPort: UInt32
     /// Unix socket on macOS that the Docker CLI will talk to.
@@ -95,6 +98,8 @@ struct Config {
                                    following egress, container reachability).
           --no-port-forward        Don't auto-forward container ports to localhost.
           --no-dynamic-memory      Don't actively balloon idle guest memory back.
+          --dns-port <n>           UDP port for the *.oort.local resolver on
+                                   127.0.0.1 (default: 5354; 0 disables).
 
         MISC:
           --no-console             Don't attach the guest serial console to stdio
@@ -120,6 +125,7 @@ struct Config {
         var forwards: [Forward] = []
         var portForward = true
         var dynamicMemory = true
+        var dnsPort: UInt16 = 5354
         var tcpForwards: [Int] = []
         var consoleLog: URL?
         var nvram: URL?
@@ -147,6 +153,7 @@ struct Config {
             case "--forward":    forwards.append(try parseForward(need(arg)))
             case "--no-port-forward": portForward = false
             case "--no-dynamic-memory": dynamicMemory = false
+            case "--dns-port":   dnsPort = UInt16(try need(arg)) ?? dnsPort
             case "--tcp-forward": if let p = Int(try need(arg)) { tcpForwards.append(p) }
             case "--console-log": consoleLog = URL(fileURLWithPath: try need(arg))
             case "--nvram":      nvram = URL(fileURLWithPath: try need(arg))
@@ -184,6 +191,7 @@ struct Config {
             portForward: portForward,
             tcpForwards: tcpForwards,
             dynamicMemory: dynamicMemory,
+            dnsPort: dnsPort,
             guestVsockPort: vsockPort,
             hostSocketPath: socketPath,
             serialConsole: console,

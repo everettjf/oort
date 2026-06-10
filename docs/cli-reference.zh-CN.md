@@ -20,7 +20,28 @@
 | `oort env` | 打印 `export DOCKER_HOST=...`，可 `eval "$(oort env)"` |
 | `oort logs` | tail 客户机控制台日志 |
 | `oort build-image` | （重新）构建启动盘 + cloud-init seed + 编译客户机 agent |
+| `oort domains enable\|route\|disable` | `*.oort.local` 域名直达容器/机器（需 sudo，见下） |
 | `oort help` | 显示帮助 |
+
+### `oort domains` —— `*.oort.local` 域名（对标 OrbStack 的 `*.orb.local`）
+
+引擎在 `127.0.0.1:5354`（UDP）内置了一个小型 DNS 服务器，按 Docker 实时状态应答：
+`<容器名>.oort.local`、`<机器名>.oort.local`（去掉 `ovm-` 前缀）、
+`<服务>.<compose项目>.oort.local` 都解析到对应容器的 bridge IP。
+
+`oort domains enable`（一次性，需 sudo）写入 `/etc/resolver/oort.local` 让 macOS 把
+`*.oort.local` 的查询发给它，并加上 `172.17.0.0/16 → 客户机` 的路由——此后容器的
+**任意端口**都能按名字直达，无需 `-p` 发布：
+
+```bash
+oort domains enable
+docker run -d --name web nginx
+curl http://web.oort.local        # 不需要发布端口
+```
+
+路由跟随客户机 IP，VM 重启后 IP 可能变化——`oort start` 会提醒，
+`oort domains route` 一条命令刷新（sudo）。`oort domains` 查看状态，`disable` 移除。
+注意：需要默认的 VZ NAT 网络（暂不支持 `OORT_NET=gvproxy`）。
 
 ### 示例
 
