@@ -65,6 +65,7 @@ func main() {
 	}
 	startHeartbeat() // touch a heartbeat file while healthy; the in-guest watchdog restarts us if it goes stale
 	serveHTTPS()     // *.oort.local TLS terminator — inert unless the CA is staged (M10)
+	go ensureContainerForward()
 	var wg sync.WaitGroup
 	wg.Add(4)
 	go func() { defer wg.Done(); serve(dockerPort, handleDocker) }()
@@ -92,6 +93,26 @@ func startHeartbeat() {
 			time.Sleep(heartbeatInterval)
 		}
 	}()
+}
+
+// ensureContainerForward lets Mac→container traffic through dockerd's FORWARD
+// policy (DROP): without it, `oort route`/`oort domains` resolve and route to
+// 172.17.x but every unpublished port times out in the guest's FORWARD chain
+// (the https path worked only because its REDIRECT lands in INPUT). The rule
+// goes in DOCKER-USER — the chain Docker explicitly reserves for user rules
+// and never flushes. We create the chain if dockerd hasn't yet (it adopts an
+// existing one), and re-assert periodically in case the ruleset is rebuilt.
+func ensureContainerForward() {
+	rule := []string{"DOCKER-USER", "-i", "enp0s1", "-o", "docker0", "-j", "ACCEPT"}
+	for {
+		exec.Command("iptables", "-N", "DOCKER-USER").Run() // idempotent-ish; exists → error ignored
+		if exec.Command("iptables", append([]string{"-C"}, rule...)...).Run() != nil {
+			if exec.Command("iptables", append([]string{"-I"}, rule...)...).Run() == nil {
+				fmt.Println("oort-guest: DOCKER-USER accept enp0s1→docker0 (container reachability)")
+			}
+		}
+		time.Sleep(60 * time.Second)
+	}
 }
 
 // serve listens on a vsock port and hands each accepted fd to handler.

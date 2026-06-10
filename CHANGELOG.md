@@ -2,6 +2,17 @@
 
 All notable changes to Oort. Dates are YYYY-MM-DD.
 
+## Unreleased
+
+- **Fix: container IPs were routable but not reachable.** `oort route`/
+  `oort domains` resolved names and routed 172.17/16 to the guest, but
+  dockerd's FORWARD policy (DROP) swallowed every unpublished port — only the
+  https path worked (its REDIRECT lands in INPUT, not FORWARD). The agent now
+  keeps an `enp0s1 → docker0 ACCEPT` in DOCKER-USER (the chain Docker reserves
+  for user rules and never flushes), re-asserted periodically. Verified from
+  macOS: `curl http://web.oort.local` (unpublished port), trusted
+  `https://web.oort.local`, and ping — the full last mile, end to end.
+
 ## v0.2.0 — 2026-06-09
 
 The "daily-driver" release: instant resume, container domains with trusted
