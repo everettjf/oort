@@ -25,6 +25,7 @@
 #   oort https enable|disable  trusted https:// for *.oort.local (local CA, sudo once)
 #   oort ssh [setup|machine]   ssh into the guest (or a machine); VS Code Remote-SSH 'oort'
 #   oort disk [reclaim]        show/return freed disk space to macOS (TRIM → hole punch)
+#   oort fs [open|mount|umount]  guest + machine filesystems in Finder at ~/Oort (no sudo)
 #   oort machine ...           manage named Linux machines (create/list/shell/…)
 #   oort machine snapshot/restore/fork   time-travel: branch & roll back an env
 #   oort fastvol <name> [path] fast guest-disk volume for a hot dir (node_modules…)
@@ -271,6 +272,8 @@ cmd_start() {
         _https_stage
       fi
       _ssh_inject_key   # keep `ssh oort` working across disk rebuilds (no-op without a key)
+      # Remount ~/Oort if the user had it mounted (the guest IP can change).
+      if [ -f "$FS_MARKER" ]; then _fs_umount; _fs_mount || true; fi
       echo; cmd_env; return 0
     fi
     printf "."; sleep 0.5
@@ -290,6 +293,7 @@ _kill_gvproxy() {
 # (OrbStack stops/cold-boots; it has nothing like this.)
 cmd_suspend() {
   if ! vm_running; then echo "oort not running"; return 0; fi
+  _fs_umount   # a frozen guest can't serve NFS; resume remounts via the marker
   local pid; pid="$(cat "$PIDFILE")"
   printf "suspending (saving VM state)…"
   kill -USR1 "$pid" 2>/dev/null || true
@@ -317,6 +321,7 @@ cmd_suspend() {
 }
 
 cmd_stop() {
+  _fs_umount   # never leave a dead NFS mount behind to wedge Finder
   if ! vm_running; then echo "oort not running"; rm -f "$PIDFILE"; _kill_gvproxy; teardown_docker_context; return 0; fi
   teardown_docker_context
   local pid; pid="$(cat "$PIDFILE")"
@@ -708,6 +713,41 @@ cmd_machine() {
     *) echo "usage: oort machine create|list|exec|shell|delete <name> [distro]
        time-travel: oort machine snapshot|snapshots|restore <name> [tag]
                     oort machine fork <src> <newname>";;
+  esac
+}
+
+# Finder integration (M13) — the guest's and every machine's filesystem in
+# Finder, like OrbStack's ~/OrbStack. The agent exports an NFS tree
+# (guest/ + machines/<name>/, live bind mounts); macOS mounts it WITHOUT sudo
+# (user mounts into your own home work with noresvport). Mounted at ~/Oort.
+OORT_FS_MOUNT="${OORT_FS_MOUNT:-$HOME/Oort}"
+FS_MARKER="$STATE/fs-enabled"
+
+_fs_mounted() { mount | grep -q " $OORT_FS_MOUNT (nfs"; }
+
+_fs_mount() {
+  _fs_mounted && return 0
+  local gip; gip="$(_guest_ip)"
+  [ -n "$gip" ] || { echo "couldn't read the guest IP (is the agent up?)"; return 1; }
+  mkdir -p "$OORT_FS_MOUNT"
+  # soft+nolocks: a dead/suspended guest must never wedge Finder.
+  mount -t nfs -o vers=3,tcp,port=2049,mountport=2049,nolocks,noresvport,soft \
+    "$gip:/" "$OORT_FS_MOUNT"
+}
+
+_fs_umount() {
+  _fs_mounted || return 0
+  umount "$OORT_FS_MOUNT" 2>/dev/null || umount -f "$OORT_FS_MOUNT" 2>/dev/null || true
+}
+
+cmd_fs() {
+  case "${1:-status}" in
+    mount)  vm_running || { echo "start oort first ('oort start')"; exit 1; }
+            _fs_mount && touch "$FS_MARKER" && echo "mounted at $OORT_FS_MOUNT (guest/ + machines/)";;
+    open)   vm_running || { echo "start oort first ('oort start')"; exit 1; }
+            _fs_mount && touch "$FS_MARKER" && open "$OORT_FS_MOUNT";;
+    umount|unmount) _fs_umount; rm -f "$FS_MARKER"; echo "unmounted";;
+    *) _fs_mounted && echo "fs: mounted at $OORT_FS_MOUNT" || echo "fs: not mounted ('oort fs open')";;
   esac
 }
 
@@ -1135,6 +1175,7 @@ case "${1:-help}" in
   https)        shift; cmd_https "$@";;
   ssh)          shift; cmd_ssh "$@";;
   disk)         shift; cmd_disk "$@";;
+  fs)           shift; cmd_fs "$@";;
   machine)      shift; cmd_machine "$@";;
   up)           shift; cmd_up "$@";;
   down)         shift; cmd_down "$@";;

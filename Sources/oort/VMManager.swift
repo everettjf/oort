@@ -130,11 +130,25 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
         }
     }
 
+    /// vsock port where the agent drops all previously-bridged connections.
+    /// Critical after a suspend/resume: the restored guest still holds vsock
+    /// sockets whose host peers died with the old engine process and will
+    /// never RST — each one strands agent goroutines+fds until execs starve.
+    private static let guestResetPort: UInt32 = 2379
+
     private func startProxy() {
         // Must read socketDevices on the VM queue (we're already on it here).
         guard let device = vm.socketDevices.first as? VZVirtioSocketDevice else {
             Log.error("no virtio-socket device on the VM")
             return
+        }
+
+        device.connect(toPort: VMManager.guestResetPort) { result in
+            if case .success(let conn) = result {
+                Log.info("asked the agent to drop stale bridged connections")
+                close(dup(conn.fileDescriptor)) // connecting IS the request
+            }
+            // Failure is fine: cold boot (agent not up yet — nothing stale).
         }
         // The Docker socket plus any extra --forward targets are all just
         // host-Unix-socket ⇄ guest-vsock-port tunnels.

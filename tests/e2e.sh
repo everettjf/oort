@@ -204,6 +204,15 @@ r=n; for _ in $(seq 1 15); do
 done
 check "$r" "y" "watchdog auto-recovers a wedged dockerd"
 
+echo "── M13 Finder fs (NFS) ───────────────────────"
+# The agent's NFS export, mounted on macOS WITHOUT sudo (user mount in a
+# user-owned dir + noresvport).
+FSTMP=$(mktemp -d)
+fsip=$(gx 'ip -4 -o addr show enp0s1 | grep -oE "192\.168\.[0-9]+\.[0-9]+" | head -1' | tail -1)
+mount -t nfs -o vers=3,tcp,port=2049,mountport=2049,nolocks,noresvport,soft "$fsip:/" "$FSTMP" 2>/dev/null
+check "$(grep -oc 'Ubuntu' "$FSTMP/guest/etc/os-release" 2>/dev/null | head -1)" "1" "guest filesystem mounted on macOS via NFS (no sudo)"
+umount "$FSTMP" 2>/dev/null; rmdir "$FSTMP" 2>/dev/null
+
 echo "── M11 ssh ───────────────────────────────────"
 # Stable localhost:2222 → guest sshd. Use a throwaway key dir so the test
 # can't clobber the user's real ~/.oort/ssh or ~/.ssh/config.

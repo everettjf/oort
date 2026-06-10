@@ -37,6 +37,7 @@ const (
 	agentPort    = 2376
 	forwardPort  = 2377
 	shutdownPort = 2378
+	resetPort    = 2379
 	dockerSock   = "/run/docker.sock"
 
 	// Liveness heartbeat: the agent rewrites this file every heartbeatInterval
@@ -65,14 +66,42 @@ func main() {
 	}
 	startHeartbeat() // touch a heartbeat file while healthy; the in-guest watchdog restarts us if it goes stale
 	serveHTTPS()     // *.oort.local TLS terminator — inert unless the CA is staged (M10)
+	serveNFS()       // guest + machine filesystems for Finder (M13)
 	go ensureContainerForward()
 	var wg sync.WaitGroup
-	wg.Add(4)
+	wg.Add(5)
 	go func() { defer wg.Done(); serve(dockerPort, handleDocker) }()
 	go func() { defer wg.Done(); serve(agentPort, handleExec) }()
 	go func() { defer wg.Done(); serve(forwardPort, handleTCPForward) }()
 	go func() { defer wg.Done(); serve(shutdownPort, handleShutdown) }()
+	go func() { defer wg.Done(); serve(resetPort, handleReset) }()
 	wg.Wait()
+}
+
+// liveConns tracks every vsock connection currently being bridged. When the
+// host engine restarts — most importantly after a SUSPEND/RESUME, where the
+// restored guest still holds vsock sockets whose host peers no longer exist
+// and will never send a RST — those connections strand their goroutines and
+// fds forever. Enough suspend cycles starve the agent of fds: execs return
+// empty (pipe/fork fails) and tcp-forward dials fail, while the heartbeat
+// (one fd) keeps the watchdog happy. The engine connects to resetPort on
+// every start; we close everything stale.
+var liveConns sync.Map // *os.File -> struct{}
+
+func trackConn(c *os.File)   { liveConns.Store(c, struct{}{}) }
+func untrackConn(c *os.File) { liveConns.Delete(c) }
+
+func handleReset(conn *os.File) {
+	defer conn.Close()
+	n := 0
+	liveConns.Range(func(k, _ any) bool {
+		k.(*os.File).Close() // unblocks both io.Copy goroutines of that bridge
+		liveConns.Delete(k)
+		n++
+		return true
+	})
+	fmt.Printf("oort-guest: engine (re)connected — reset %d stale bridged connections\n", n)
+	conn.Write([]byte("ok\n"))
 }
 
 // startHeartbeat writes a freshness marker every ~10s for as long as the agent
@@ -157,6 +186,8 @@ func serve(port uint32, handler func(*os.File)) {
 // streams — `docker run --rm … echo hi` lost its output because the client
 // half-closed the request side before the container's stdout came back.
 func handleDocker(vconn *os.File) {
+	trackConn(vconn)
+	defer untrackConn(vconn)
 	defer vconn.Close()
 	dconn, err := net.Dial("unix", dockerSock)
 	if err != nil {
@@ -184,6 +215,8 @@ func handleDocker(vconn *os.File) {
 // and splice. This is how a container's published port becomes reachable on the
 // macOS localhost: oort listens on 127.0.0.1:P and tunnels here over vsock.
 func handleTCPForward(conn *os.File) {
+	trackConn(conn)
+	defer untrackConn(conn)
 	defer conn.Close()
 	r := bufio.NewReader(conn)
 	line, err := r.ReadString('\n')
@@ -269,6 +302,8 @@ func handleShutdown(conn *os.File) {
 // handleExec reads one HTTP request whose body is a shell command, runs it,
 // and writes the combined output back as the response body.
 func handleExec(conn *os.File) {
+	trackConn(conn)
+	defer untrackConn(conn)
 	defer conn.Close()
 	req, err := http.ReadRequest(bufio.NewReader(conn))
 	if err != nil {

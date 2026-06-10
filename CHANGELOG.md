@@ -11,6 +11,24 @@ All notable changes to Oort. Dates are YYYY-MM-DD.
   `Host oort` block into `~/.ssh/config` — after that `ssh oort`, `scp`,
   and VS Code's Remote-SSH "oort" just work; `oort ssh <machine> [cmd]`
   shells into a machine. Verified live (ubuntu + root + machine + sftp).
+- **`~/Oort` in Finder — `oort fs open`.** The guest's and every machine's
+  live filesystem, browsable and read-write from macOS (OrbStack's
+  `~/OrbStack`): a pure-Go NFSv3 server in the agent exports `guest/` (the
+  whole guest) and `machines/<name>/` (each machine's merged rootfs,
+  reconciled as machines start/stop) — no guest packages, and the macOS mount
+  needs **no sudo** (user mount + noresvport). Auto-remounted across
+  restarts/resume, auto-unmounted on stop/suspend so a frozen guest can never
+  wedge Finder. Verified: read guest files, write a file from the Mac and
+  read it inside the machine.
+- **Fix: suspend/resume slowly starved the guest agent (the "empty exec"
+  failure).** Every engine restart — above all suspend/resume — left the
+  restored guest holding vsock connections whose host peers no longer exist
+  and never RST; each stranded two agent goroutines + fds. Enough cycles and
+  `oort exec` returned empty (pipe/fork starvation) while ssh/tcp-forwards
+  failed — yet the heartbeat (one fd) kept the watchdog happy, so it never
+  self-healed. The engine now pings a reset port (2379) on every start and
+  the agent drops all previously-bridged connections. Verified: back-to-back
+  suspend/resume cycles keep exec+ssh green, reset events logged.
 - **Disk space returns to macOS — `oort disk reclaim` + a daily timer.** VZ
   passes guest TRIM through to the raw image as APFS hole-punches, so freed
   guest space literally shrinks the host file. `oort disk reclaim [--prune]`
