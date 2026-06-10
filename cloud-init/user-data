@@ -235,6 +235,31 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
+  # Daily TRIM (M12): VZ passes guest discards through to the raw disk image
+  # as APFS hole-punches, so freed guest space returns to macOS. Ubuntu's
+  # stock fstrim.timer is weekly — too slow for a dev VM that churns images;
+  # this one runs shortly after boot and then daily. `oort disk reclaim` does
+  # it on demand.
+  - path: /etc/systemd/system/oort-trim.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=oort: return freed disk space to macOS (fstrim)
+      [Service]
+      Type=oneshot
+      ExecStart=/bin/sh -c 'sync; fstrim -a 2>/dev/null || fstrim / 2>/dev/null || true'
+  - path: /etc/systemd/system/oort-trim.timer
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=oort: daily disk-space return
+      [Timer]
+      OnBootSec=3min
+      OnUnitActiveSec=24h
+      AccuracySec=1h
+      [Install]
+      WantedBy=timers.target
+
   # Register Rosetta with binfmt_misc so x86-64 ELF (incl. amd64 containers)
   # is translated. printf %s writes the literal \xHH magic; the kernel decodes
   # it. The "F" flag opens the interpreter at registration time, so it works
@@ -497,6 +522,8 @@ runcmd:
   - systemctl enable --now oort-watchdog.timer || true
   # Periodic container-egress self-heal (complements the boot-only net-heal).
   - systemctl enable --now oort-egress-heal.timer || true
+  # Daily disk-space return (fstrim → APFS hole punch on the Mac).
+  - systemctl enable --now oort-trim.timer || true
   # The two settings below only affect LATER boots, so run them after Docker +
   # the agent are already up — never let them sit in front of bring-up.
   # IPv6 is disabled project-wide (bootcmd), but cloud-init renders the NIC with

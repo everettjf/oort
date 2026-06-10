@@ -11,6 +11,12 @@ All notable changes to Oort. Dates are YYYY-MM-DD.
   `Host oort` block into `~/.ssh/config` — after that `ssh oort`, `scp`,
   and VS Code's Remote-SSH "oort" just work; `oort ssh <machine> [cmd]`
   shells into a machine. Verified live (ubuntu + root + machine + sftp).
+- **Disk space returns to macOS — `oort disk reclaim` + a daily timer.** VZ
+  passes guest TRIM through to the raw image as APFS hole-punches, so freed
+  guest space literally shrinks the host file. `oort disk reclaim [--prune]`
+  does it on demand (verified: 800M of guest churn → exactly 800M returned);
+  the in-guest `oort-trim.timer` runs it shortly after boot and daily
+  (Ubuntu's stock fstrim.timer is only weekly). `oort disk` shows usage.
 - **Fix: container IPs were routable but not reachable.** `oort route`/
   `oort domains` resolved names and routed 172.17/16 to the guest, but
   dockerd's FORWARD policy (DROP) swallowed every unpublished port — only the

@@ -24,6 +24,7 @@
 #   oort debug <container>     toolbox shell into ANY container (even distroless)
 #   oort https enable|disable  trusted https:// for *.oort.local (local CA, sudo once)
 #   oort ssh [setup|machine]   ssh into the guest (or a machine); VS Code Remote-SSH 'oort'
+#   oort disk [reclaim]        show/return freed disk space to macOS (TRIM → hole punch)
 #   oort machine ...           manage named Linux machines (create/list/shell/…)
 #   oort machine snapshot/restore/fork   time-travel: branch & roll back an env
 #   oort fastvol <name> [path] fast guest-disk volume for a hot dir (node_modules…)
@@ -710,6 +711,37 @@ cmd_machine() {
   esac
 }
 
+# Disk space (M12). VZ passes guest TRIM through to the raw image as APFS
+# hole-punches, so `fstrim` literally returns freed guest space to macOS
+# (verified: +1.5G of guest churn went 2.6G→4.1G→2.6G on the host file).
+# A daily in-guest timer (oort-trim.timer) does this automatically; `reclaim`
+# is the on-demand version, `--prune` also clears unused docker data first.
+cmd_disk() {
+  case "${1:-status}" in
+    reclaim)
+      vm_running || { echo "start oort first ('oort start')"; exit 1; }
+      local before; before=$(du -m "$DISK" 2>/dev/null | cut -f1)
+      if [ "${2:-}" = "--prune" ]; then
+        echo "pruning unused docker data (images/containers/build cache)…"
+        cmd_docker system prune -af 2>/dev/null | tail -1
+      fi
+      printf "trimming…"
+      cmd_exec 'sync; fstrim -a 2>/dev/null || fstrim /; sync' >/dev/null 2>&1
+      sleep 2   # let APFS settle before measuring
+      local after; after=$(du -m "$DISK" 2>/dev/null | cut -f1)
+      echo " done — disk image ${before}M → ${after}M (returned $((before - after))M to macOS)"
+      ;;
+    *)
+      echo "disk image: $(ls -lh "$DISK" 2>/dev/null | awk '{print $5}') max, $(du -h "$DISK" 2>/dev/null | cut -f1) on disk"
+      if vm_running; then
+        cmd_exec 'df -h / | awk "NR==2{print \"guest /:    \"\$3\" used of \"\$2}"' 2>/dev/null
+        cmd_docker system df 2>/dev/null | sed 's/^/  docker: /' | head -5
+      fi
+      echo "('oort disk reclaim [--prune]' returns freed space to macOS; a daily in-guest timer also runs it)"
+      ;;
+  esac
+}
+
 # SSH into the guest (M11) — and with it, VS Code Remote-SSH. The guest's sshd
 # is projected onto a STABLE localhost port (default 2222) by the engine's
 # static tcp-forward, so it survives guest-IP changes and works under gvproxy.
@@ -1102,6 +1134,7 @@ case "${1:-help}" in
   debug)        shift; cmd_debug "$@";;
   https)        shift; cmd_https "$@";;
   ssh)          shift; cmd_ssh "$@";;
+  disk)         shift; cmd_disk "$@";;
   machine)      shift; cmd_machine "$@";;
   up)           shift; cmd_up "$@";;
   down)         shift; cmd_down "$@";;

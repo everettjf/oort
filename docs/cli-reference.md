@@ -30,6 +30,7 @@ lifecycle / exec / passthrough conveniences.
 | `oort debug <container> [cmd...]` | Toolbox shell into ANY container, even distroless: busybox joins the target's pid+net namespaces; target rootfs at `/proc/1/root` |
 | `oort https enable\|disable` | Trusted `https://web.oort.local` for any container: local CA (trusted once, sudo), TLS terminated in-guest with per-name certs, forwarded to the container's :80. Needs `oort domains` |
 | `oort ssh [setup\|machine [cmd...]]` | `setup` writes a `Host oort` block (guest sshd on a stable `localhost:2222`) — then `ssh oort` and **VS Code Remote-SSH** just work; `oort ssh <machine>` shells into a machine. Key re-injected on every start |
+| `oort disk [reclaim [--prune]]` | Show disk usage / return freed guest space to macOS right now (TRIM → APFS hole-punch; `--prune` clears unused docker data first). A daily in-guest timer also runs it |
 | `oort machine ...` | Manage named Linux machines (see below) |
 | `oort up [file]` | Bring up machines declared in `oort.yaml`/`.json` (env-as-code); runs each machine's one-time `setup` |
 | `oort down [file]` | Tear those machines down (`--purge` also drops their snapshots) |

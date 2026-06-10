@@ -25,6 +25,7 @@
 | `oort debug <容器> [命令...]` | 工具箱 shell 进入**任意**容器（包括 distroless）：busybox 加入目标的 pid+net 命名空间，目标根文件系统在 `/proc/1/root` |
 | `oort https enable\|disable` | 可信的 `https://web.oort.local`：本地 CA（一次 sudo 信任），客户机内终止 TLS、按域名动态签发证书、转发到容器 :80。需先 `oort domains` |
 | `oort ssh [setup\|机器 [命令...]]` | `setup` 写入 `Host oort` 配置（客户机 sshd 投影到固定的 `localhost:2222`）——之后 `ssh oort` 和 **VS Code Remote-SSH** 直接可用；`oort ssh <机器>` 进入机器。密钥每次启动自动重注入 |
+| `oort disk [reclaim [--prune]]` | 查看磁盘占用 / 立即把客户机释放的空间还给 macOS（TRIM → APFS 打洞；`--prune` 先清理无用 docker 数据）。客户机内每日定时器也会自动执行 |
 | `oort domains enable\|route\|disable` | `*.oort.local` 域名直达容器/机器（见下） |
 | `oort help` | 显示帮助 |
 
