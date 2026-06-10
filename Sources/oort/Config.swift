@@ -32,8 +32,10 @@ struct Config {
     var forwards: [Forward]
     /// Auto-forward container-published ports to the macOS localhost (Stage 3).
     var portForward: Bool
-    /// Always-on localhost→guest TCP forwards (e.g. the k3s API on 6443) (M6).
-    var tcpForwards: [Int]
+    /// Always-on localhost→guest TCP forwards (e.g. the k3s API on 6443, or
+    /// sshd as 2222:22) (M6/M11). hostPort on 127.0.0.1 ⇄ guestPort in the guest.
+    struct TCPForward: Hashable { var hostPort: Int; var guestPort: Int }
+    var tcpForwards: [TCPForward]
     /// Active memory ballooning: return idle guest memory to macOS (M3).
     var dynamicMemory: Bool
     /// `*.oort.local` DNS responder for container/machine domains (M7).
@@ -133,7 +135,7 @@ struct Config {
         var portForward = true
         var dynamicMemory = true
         var dnsPort: UInt16 = 5354
-        var tcpForwards: [Int] = []
+        var tcpForwards: [TCPForward] = []
         var consoleLog: URL?
         var nvram: URL?
         var stateFile: URL?
@@ -162,7 +164,7 @@ struct Config {
             case "--no-port-forward": portForward = false
             case "--no-dynamic-memory": dynamicMemory = false
             case "--dns-port":   dnsPort = UInt16(try need(arg)) ?? dnsPort
-            case "--tcp-forward": if let p = Int(try need(arg)) { tcpForwards.append(p) }
+            case "--tcp-forward": tcpForwards.append(try parseTCPForward(need(arg)))
             case "--console-log": consoleLog = URL(fileURLWithPath: try need(arg))
             case "--nvram":      nvram = URL(fileURLWithPath: try need(arg))
             case "--state":      stateFile = URL(fileURLWithPath: try need(arg))
@@ -222,6 +224,16 @@ struct Config {
         let tag = (parts.count > 1 && !parts[1].isEmpty) ? parts[1] : (index == 0 ? "mac" : "share\(index)")
         let readOnly = parts.count > 2 && parts[2] == "ro"
         return Mount(host: host, tag: tag, readOnly: readOnly)
+    }
+
+    /// Parse `--tcp-forward <port>` (same port both sides) or `<host>:<guest>`.
+    private static func parseTCPForward(_ spec: String) throws -> TCPForward {
+        let parts = spec.split(separator: ":").map(String.init)
+        if parts.count == 1, let p = Int(parts[0]) { return TCPForward(hostPort: p, guestPort: p) }
+        if parts.count == 2, let h = Int(parts[0]), let g = Int(parts[1]) {
+            return TCPForward(hostPort: h, guestPort: g)
+        }
+        throw CLIError.usage("--tcp-forward must be <port> or <hostPort>:<guestPort>")
     }
 
     /// Parse `--forward <hostSocketPath>:<guestVsockPort>`.

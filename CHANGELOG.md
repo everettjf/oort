@@ -4,6 +4,13 @@ All notable changes to Oort. Dates are YYYY-MM-DD.
 
 ## Unreleased
 
+- **`oort ssh` + VS Code Remote-SSH.** The guest's sshd is projected onto a
+  stable `localhost:2222` (new `--tcp-forward host:guest` syntax), surviving
+  guest-IP changes and gvproxy. `oort ssh setup` injects a dedicated keypair
+  (re-injected on every start, so disk rebuilds self-heal) and writes a
+  `Host oort` block into `~/.ssh/config` — after that `ssh oort`, `scp`,
+  and VS Code's Remote-SSH "oort" just work; `oort ssh <machine> [cmd]`
+  shells into a machine. Verified live (ubuntu + root + machine + sftp).
 - **Fix: container IPs were routable but not reachable.** `oort route`/
   `oort domains` resolved names and routed 172.17/16 to the guest, but
   dockerd's FORWARD policy (DROP) swallowed every unpublished port — only the

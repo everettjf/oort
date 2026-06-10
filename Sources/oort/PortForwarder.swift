@@ -14,12 +14,12 @@ final class PortForwarder {
     private weak var socketDevice: VZVirtioSocketDevice?
     private let guestForwardPort: UInt32
 
-    private let staticPorts: Set<Int>   // always forwarded (e.g. k3s API 6443)
+    private let staticPorts: Set<Config.TCPForward>   // always forwarded (k3s 6443, sshd 2222:22)
     private let lock = NSLock()
-    private var listeners: [Int: Int32] = [:]   // hostPort -> listening fd
+    private var listeners: [Config.TCPForward: Int32] = [:]   // forward -> listening fd
 
     init(dockerSocketPath: String, vmQueue: DispatchQueue, socketDevice: VZVirtioSocketDevice,
-         staticPorts: [Int] = [], guestForwardPort: UInt32 = 2377) {
+         staticPorts: [Config.TCPForward] = [], guestForwardPort: UInt32 = 2377) {
         self.dockerSocketPath = dockerSocketPath
         self.vmQueue = vmQueue
         self.socketDevice = socketDevice
@@ -72,29 +72,29 @@ final class PortForwarder {
 
     // MARK: - Reconcile listeners against the desired port set
 
-    private func reconcile(desired: Set<Int>) {
+    private func reconcile(desired: Set<Config.TCPForward>) {
         lock.lock(); defer { lock.unlock() }
-        for port in desired where listeners[port] == nil {
-            if let fd = openListener(port) {
-                listeners[port] = fd
-                Log.info("forwarding 127.0.0.1:\(port) → guest:\(port)")
+        for fwd in desired where listeners[fwd] == nil {
+            if let fd = openListener(fwd) {
+                listeners[fwd] = fd
+                Log.info("forwarding 127.0.0.1:\(fwd.hostPort) → guest:\(fwd.guestPort)")
             }
         }
-        for (port, fd) in listeners where !desired.contains(port) {
+        for (fwd, fd) in listeners where !desired.contains(fwd) {
             close(fd)
-            listeners.removeValue(forKey: port)
-            Log.info("stopped forwarding 127.0.0.1:\(port)")
+            listeners.removeValue(forKey: fwd)
+            Log.info("stopped forwarding 127.0.0.1:\(fwd.hostPort)")
         }
     }
 
-    private func openListener(_ port: Int) -> Int32? {
+    private func openListener(_ fwd: Config.TCPForward) -> Int32? {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
         var yes: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = in_port_t(UInt16(port).bigEndian)
+        addr.sin_port = in_port_t(UInt16(fwd.hostPort).bigEndian)
         addr.sin_addr.s_addr = inet_addr("127.0.0.1")
         let bound = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
@@ -102,18 +102,18 @@ final class PortForwarder {
             }
         }
         guard bound == 0, listen(fd, 128) == 0 else { close(fd); return nil }
-        Thread.detachNewThread { [weak self] in self?.acceptLoop(fd, port: port) }
+        Thread.detachNewThread { [weak self] in self?.acceptLoop(fd, guestPort: fwd.guestPort) }
         return fd
     }
 
-    private func acceptLoop(_ listenFD: Int32, port: Int) {
+    private func acceptLoop(_ listenFD: Int32, guestPort: Int) {
         while true {
             let client = accept(listenFD, nil, nil)
             if client < 0 {
                 if errno == EINTR { continue }
                 return // listener closed
             }
-            tunnel(clientFD: client, port: port)
+            tunnel(clientFD: client, port: guestPort)
         }
     }
 
@@ -160,17 +160,17 @@ final class PortForwarder {
 
     // MARK: - Docker API: list published TCP ports
 
-    private func publishedPorts() -> Set<Int> {
+    private func publishedPorts() -> Set<Config.TCPForward> {
         guard let body = httpGet("/containers/json"),
               let json = try? JSONSerialization.jsonObject(with: body) as? [[String: Any]] else {
             return []
         }
-        var ports = Set<Int>()
+        var ports = Set<Config.TCPForward>()
         for container in json {
             guard let list = container["Ports"] as? [[String: Any]] else { continue }
             for p in list {
                 if (p["Type"] as? String) == "tcp", let pub = p["PublicPort"] as? Int, pub > 0 {
-                    ports.insert(pub)
+                    ports.insert(Config.TCPForward(hostPort: pub, guestPort: pub))
                 }
             }
         }

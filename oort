@@ -23,6 +23,7 @@
 #   oort k8s enable|disable    run Kubernetes (k3s) in the guest
 #   oort debug <container>     toolbox shell into ANY container (even distroless)
 #   oort https enable|disable  trusted https:// for *.oort.local (local CA, sudo once)
+#   oort ssh [setup|machine]   ssh into the guest (or a machine); VS Code Remote-SSH 'oort'
 #   oort machine ...           manage named Linux machines (create/list/shell/…)
 #   oort machine snapshot/restore/fork   time-travel: branch & roll back an env
 #   oort fastvol <name> [path] fast guest-disk volume for a hot dir (node_modules…)
@@ -168,6 +169,7 @@ cmd_start() {
   local extra=()
   [ -f "$K8S_MARKER" ] && extra+=(--tcp-forward 6443)   # project the k3s API
   extra+=(--dns-port "$DNS_PORT")   # *.oort.local resolver (OORT_DNS_PORT; 0 disables)
+  extra+=(--tcp-forward "$SSH_PORT:22")   # guest sshd on a stable localhost port (M11)
   # Suspend/resume (M8): always hand the engine the state path — it restores
   # from it when present (sub-second start, containers intact) and SIGUSR1
   # (oort suspend) saves back to it. Stale-state guard: the state is only
@@ -267,6 +269,7 @@ cmd_start() {
         echo "(https: re-staging the CA into the rebuilt guest…)"
         _https_stage
       fi
+      _ssh_inject_key   # keep `ssh oort` working across disk rebuilds (no-op without a key)
       echo; cmd_env; return 0
     fi
     printf "."; sleep 0.5
@@ -707,6 +710,69 @@ cmd_machine() {
   esac
 }
 
+# SSH into the guest (M11) — and with it, VS Code Remote-SSH. The guest's sshd
+# is projected onto a STABLE localhost port (default 2222) by the engine's
+# static tcp-forward, so it survives guest-IP changes and works under gvproxy.
+# `setup` injects a dedicated keypair + writes a `Host oort` block into
+# ~/.ssh/config; after that `ssh oort` and VS Code's Remote-SSH "oort" just work.
+SSH_DIR="$STATE/ssh"
+SSH_PORT="${OORT_SSH_PORT:-2222}"
+
+# Idempotently push our pubkey into the guest (ubuntu + root). Re-run on every
+# start (cheap) so a rebuilt/reset disk heals itself like https/route do.
+_ssh_inject_key() {
+  [ -f "$SSH_DIR/id_ed25519.pub" ] || return 0
+  local pub; pub="$(cat "$SSH_DIR/id_ed25519.pub")"
+  curl -s --max-time 10 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
+    "for h in /home/ubuntu /root; do u=\$(basename \$h); [ \$u = root ] && u=root || u=ubuntu; mkdir -p \$h/.ssh; grep -qF '$pub' \$h/.ssh/authorized_keys 2>/dev/null || echo '$pub' >> \$h/.ssh/authorized_keys; chmod 700 \$h/.ssh; chmod 600 \$h/.ssh/authorized_keys; chown -R \$u:\$u \$h/.ssh 2>/dev/null; done" \
+    http://localhost/ >/dev/null 2>&1 || true
+}
+
+cmd_ssh() {
+  case "${1:-}" in
+    setup)
+      mkdir -p "$SSH_DIR"
+      [ -f "$SSH_DIR/id_ed25519" ] || ssh-keygen -q -t ed25519 -N "" -C "oort" -f "$SSH_DIR/id_ed25519"
+      vm_running && _ssh_inject_key
+      # Guarded Host block in ~/.ssh/config (replace any previous oort block).
+      mkdir -p "$HOME/.ssh"; touch "$HOME/.ssh/config"
+      sed -i '' '/^# >>> oort >>>/,/^# <<< oort <<</d' "$HOME/.ssh/config"
+      cat >> "$HOME/.ssh/config" <<CFG
+# >>> oort >>>
+Host oort
+  HostName 127.0.0.1
+  Port $SSH_PORT
+  User ubuntu
+  IdentityFile $SSH_DIR/id_ed25519
+  UserKnownHostsFile /dev/null
+  StrictHostKeyChecking no
+  LogLevel ERROR
+# <<< oort <<<
+CFG
+      echo "ssh configured:"
+      echo "  ssh oort                  # shell into the guest"
+      echo "  ssh root@oort … also works; VS Code Remote-SSH: pick host 'oort'"
+      ;;
+    *)
+      [ -f "$SSH_DIR/id_ed25519" ] || { cmd_ssh setup; }
+      vm_running || { echo "start oort first ('oort start')"; exit 1; }
+      if [ $# -gt 0 ] && cmd_docker container inspect "$MACHINE_PREFIX$1" >/dev/null 2>&1; then
+        # `oort ssh <machine> [cmd…]` — straight into a machine container.
+        local m="$1"; shift
+        if [ $# -gt 0 ]; then
+          local q; printf -v q '%q ' docker exec "$MACHINE_PREFIX$m" "$@"; cmd_exec "$q"
+        else
+          cmd_docker exec -it "$MACHINE_PREFIX$m" sh -c 'command -v bash >/dev/null 2>&1 && exec bash || exec sh'
+        fi
+      else
+        exec ssh -p "$SSH_PORT" -i "$SSH_DIR/id_ed25519" \
+          -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR \
+          ubuntu@127.0.0.1 "$@"
+      fi
+      ;;
+  esac
+}
+
 # HTTPS for *.oort.local (M10) — trusted https:// for any container.
 # A local CA is generated on the Mac and trusted once in the system keychain
 # (the only sudo); its material is staged into the guest, where the agent
@@ -1035,6 +1101,7 @@ case "${1:-help}" in
   k8s)          shift; cmd_k8s "$@";;
   debug)        shift; cmd_debug "$@";;
   https)        shift; cmd_https "$@";;
+  ssh)          shift; cmd_ssh "$@";;
   machine)      shift; cmd_machine "$@";;
   up)           shift; cmd_up "$@";;
   down)         shift; cmd_down "$@";;

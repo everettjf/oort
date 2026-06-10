@@ -204,6 +204,17 @@ r=n; for _ in $(seq 1 15); do
 done
 check "$r" "y" "watchdog auto-recovers a wedged dockerd"
 
+echo "── M11 ssh ───────────────────────────────────"
+# Stable localhost:2222 → guest sshd. Use a throwaway key dir so the test
+# can't clobber the user's real ~/.oort/ssh or ~/.ssh/config.
+SSHTMP=$(mktemp -d)
+ssh-keygen -q -t ed25519 -N "" -f "$SSHTMP/k"
+pub=$(cat "$SSHTMP/k.pub")
+gx "mkdir -p /root/.ssh && echo '$pub' >> /root/.ssh/authorized_keys && chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys" >/dev/null 2>&1
+r=$(ssh -p 2222 -i "$SSHTMP/k" -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=8 root@127.0.0.1 'echo SSHOK' 2>/dev/null)
+check "$r" "SSHOK" "ssh into the guest via localhost:2222"
+rm -rf "$SSHTMP"
+
 echo "── M10 https (*.oort.local TLS) ──────────────"
 # Stage a throwaway CA in the guest; the agent then terminates TLS on :8443,
 # minting a per-SNI leaf and resolving the backend container by name. Tested
