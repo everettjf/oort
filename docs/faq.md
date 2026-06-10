@@ -98,6 +98,12 @@ core and every host connect got RST. Provisioning now pins the module via
 image, `sudo modprobe vmw_vsock_virtio_transport` inside the guest fixes it live
 (then rebuild with `oort build-image`).
 
+### `oort build-image` fails with "Failed to lock byte"
+Something still holds the disk image. A force-killed engine (`kill -9`) orphans
+its Virtualization XPC child, which keeps a byte-range lock on `disk.img` —
+`build-image` now clears holders automatically, but if you hit this elsewhere:
+`lsof -t images/disk.img | xargs kill -9`.
+
 ### Startup is slow / it reinstalls Docker every time
 `oort build-image` resets the disk and re-provisions. **`oort start` alone (without build-image)
 reuses the provisioned disk** and boots in seconds. Day to day:

@@ -30,6 +30,8 @@ echo "════════ oort e2e ════════"
 if [ "$FRESH" = 1 ]; then
   echo "==> build-image (fresh golden)"
   pkill -9 -f "oort run" 2>/dev/null || true; rm -f "$HOME/.oort/vm.pid"
+  # kill -9 on an engine orphans its VZ XPC child, which keeps the disk locked
+  lsof -t "$HERE/images/disk.img" 2>/dev/null | xargs kill -9 2>/dev/null || true; sleep 1
   "$ORB" build-image >/dev/null 2>&1 || { echo "build-image FAILED"; exit 1; }
 fi
 
@@ -110,6 +112,17 @@ echo "── M7 *.oort.local domains ──────────────�
 # The engine's DNS responder (127.0.0.1:5354) — testable without sudo or the
 # /etc/resolver file by querying it directly. Reachability (route) is covered
 # by `oort domains enable`, which needs sudo and stays manual.
+# Wait (bounded) until the agent answers execs again — needed after anything
+# that restarts oort-guest mid-suite; suspending or testing through a
+# mid-restart agent produces nasty false failures.
+agent_settle() {
+  for _ in $(seq 1 20); do
+    [ "$(gx 'echo up' 2>/dev/null | tail -1)" = up ] && return 0
+    sleep 1
+  done
+  return 0
+}
+
 # busybox is baked into the golden, so this works even on a bad-egress boot.
 gdock rm -f e2edns >/dev/null 2>&1
 gdock run -d --name e2edns --platform linux/arm64 busybox:latest sleep 300 >/dev/null 2>&1
@@ -210,7 +223,7 @@ echo "── M13 Finder fs (NFS) ───────────────�
 FSTMP=$(mktemp -d)
 fsip=$(gx 'ip -4 -o addr show enp0s1 | grep -oE "192\.168\.[0-9]+\.[0-9]+" | head -1' | tail -1)
 mount -t nfs -o vers=3,tcp,port=2049,mountport=2049,nolocks,noresvport,soft "$fsip:/" "$FSTMP" 2>/dev/null
-check "$(grep -oc 'Ubuntu' "$FSTMP/guest/etc/os-release" 2>/dev/null | head -1)" "1" "guest filesystem mounted on macOS via NFS (no sudo)"
+check "$(grep -q 'Ubuntu' "$FSTMP/guest/etc/os-release" 2>/dev/null && echo ok)" "ok" "guest filesystem mounted on macOS via NFS (no sudo)"
 umount "$FSTMP" 2>/dev/null; rmdir "$FSTMP" 2>/dev/null
 
 echo "── M11 ssh ───────────────────────────────────"
@@ -230,13 +243,14 @@ echo "── M10 https (*.oort.local TLS) ────────────�
 # in-guest via a direct connect (the Mac-side REDIRECT path needs the sudo
 # route, which e2e can't take).
 gx 'mkdir -p /etc/oort/https && cd /etc/oort/https && openssl ecparam -name prime256v1 -genkey -noout -out ca.key 2>/dev/null && openssl req -x509 -new -key ca.key -sha256 -days 30 -subj "/CN=oort e2e CA" -out ca.pem 2>/dev/null && systemctl restart oort-guest && echo ok' >/dev/null 2>&1
+agent_settle
 gdock rm -f e2etls >/dev/null 2>&1
 gdock run -d --name e2etls --platform linux/arm64 busybox:latest sh -c 'mkdir -p /w; echo TLSOK>/w/index.html; exec httpd -f -p 80 -h /w' >/dev/null 2>&1
 r=""; for _ in $(seq 1 12); do r=$(gx 'curl -s --cacert /etc/oort/https/ca.pem --resolve e2etls.oort.local:8443:127.0.0.1 https://e2etls.oort.local:8443/index.html' 2>/dev/null | tail -1); [ "$r" = TLSOK ] && break; sleep 1; done
 check "$r" "TLSOK" "https: TLS terminated, per-SNI cert, backend by name"
 gdock rm -f e2etls >/dev/null 2>&1
 gx 'rm -rf /etc/oort/https; systemctl restart oort-guest' >/dev/null 2>&1
-sleep 2   # let the agent settle before the next section
+agent_settle   # NEVER suspend (next section) through a mid-restart agent
 
 echo "── M8 suspend/resume ─────────────────────────"
 # Freeze the VM mid-flight with a counting container, resume, and require BOTH

@@ -11,6 +11,18 @@ All notable changes to Oort. Dates are YYYY-MM-DD.
   `Host oort` block into `~/.ssh/config` — after that `ssh oort`, `scp`,
   and VS Code's Remote-SSH "oort" just work; `oort ssh <machine> [cmd]`
   shells into a machine. Verified live (ubuntu + root + machine + sftp).
+- **Robustness sweep from running the full fresh-image suite end to end:**
+  `build-image` now clears stale disk-image holders first (a force-killed
+  engine orphans its VZ XPC child, which keeps a byte lock — "Failed to lock
+  byte 101"); `oort suspend` refuses to freeze a VM whose agent is
+  mid-restart/dead (the resumed guest would have no control channel); the
+  https stage/probe helpers use best-effort curl instead of `cmd_exec`
+  (whose internal `exit 1` killed the whole script when the staged command's
+  trailing agent restart cut the reply — this broke build-image's
+  provisioning boot); e2e waits for the agent to settle after restarts
+  instead of sleeping; and provisioning is deterministic when
+  `share/docker-27.3.1.tgz` is pre-staged (the in-guest CDN download
+  otherwise races the 5-minute start ceiling on slow networks).
 - **`~/Oort` in Finder — `oort fs open`.** The guest's and every machine's
   live filesystem, browsable and read-write from macOS (OrbStack's
   `~/OrbStack`): a pure-Go NFSv3 server in the agent exports `guest/` (the

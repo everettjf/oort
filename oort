@@ -293,6 +293,16 @@ _kill_gvproxy() {
 # (OrbStack stops/cold-boots; it has nothing like this.)
 cmd_suspend() {
   if ! vm_running; then echo "oort not running"; return 0; fi
+  # Don't freeze a VM whose agent is mid-restart/dead: the resumed guest then
+  # has no working control channel and (with the clock un-steppable) the
+  # watchdog can stay blind. Wait briefly; proceed with a warning if it never
+  # answers (the user may be suspending precisely because things are stuck).
+  local ok=n
+  for _ in $(seq 1 10); do
+    [ "$(curl -s --max-time 3 --unix-socket "$AGENT_SOCK" -X POST --data-binary 'echo up' http://localhost/ 2>/dev/null)" = up ] && { ok=y; break; }
+    sleep 1
+  done
+  [ "$ok" = y ] || echo "(warning: guest agent not answering — suspending anyway)"
   _fs_umount   # a frozen guest can't serve NFS; resume remounts via the marker
   local pid; pid="$(cat "$PIDFILE")"
   printf "suspending (saving VM state)…"
@@ -379,6 +389,14 @@ cmd_logs() { tail -f "$CONSOLE_LOG"; }
 # snapshot the ready disk. After this, every `oort start` is the fast reuse path
 # (no provisioning) — and `oort reset` can restore the golden image instantly.
 cmd_build_image() {
+  # A force-killed engine can orphan its VZ XPC child, which keeps a byte
+  # lock on the disk image — qemu-img then fails with "Failed to lock byte".
+  # Clear any holder of OUR disk before rebuilding it.
+  local holders; holders="$(lsof -t "$DISK" 2>/dev/null || true)"
+  if [ -n "$holders" ]; then
+    echo "killing stale processes holding $DISK: $holders"
+    echo "$holders" | xargs kill -9 2>/dev/null; sleep 1
+  fi
   (cd "$HERE" && ./make-image.sh)
   echo "==> provisioning the image (one-time first boot)…"
   # Provision under EFI, not whatever kernel happens to be staged: EFI is the most
@@ -855,15 +873,22 @@ HTTPS_DIR="$STATE/https"
 # Ship the CA into the guest and restart the agent so the terminator picks it
 # up. Used by `https enable` and by `oort start` (a disk reset/rebuild wipes
 # the guest copy; the Mac-side CA in $HTTPS_DIR is the durable one).
+# Both helpers use raw curl, NOT cmd_exec: cmd_exec `exit 1`s the whole script
+# when the agent doesn't answer — and the staging command ends in `systemctl
+# restart oort-guest`, which always cuts the connection serving the reply
+# (this exit killed build-image's provisioning start until v0.2.1).
 _https_stage() {
   local certb64 keyb64
   certb64=$(base64 < "$HTTPS_DIR/ca.pem" | tr -d '\n')
   keyb64=$(base64 < "$HTTPS_DIR/ca.key" | tr -d '\n')
-  cmd_exec "mkdir -p /etc/oort/https && echo $certb64 | base64 -d > /etc/oort/https/ca.pem && echo $keyb64 | base64 -d > /etc/oort/https/ca.key && chmod 600 /etc/oort/https/ca.key && systemctl restart oort-guest" >/dev/null 2>&1 || true
+  curl -s --max-time 20 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
+    "mkdir -p /etc/oort/https && echo $certb64 | base64 -d > /etc/oort/https/ca.pem && echo $keyb64 | base64 -d > /etc/oort/https/ca.key && chmod 600 /etc/oort/https/ca.key && systemctl restart oort-guest" \
+    http://localhost/ >/dev/null 2>&1 || true
 }
 
 _https_up() {
-  cmd_exec 'ss -tln 2>/dev/null | grep -q 8443 && echo UP' 2>/dev/null | grep -q UP
+  curl -s --max-time 8 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
+    'ss -tln 2>/dev/null | grep -q 8443 && echo UP' http://localhost/ 2>/dev/null | grep -q UP
 }
 
 cmd_https() {
