@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,6 +58,14 @@ const (
 var execSem = make(chan struct{}, maxConcurrentExec)
 
 func main() {
+	// `oort-guest mac <cmd…>` (or via the /usr/local/bin/mac symlink): client
+	// mode — run a command ON THE MAC (M14).
+	if filepath.Base(os.Args[0]) == "mac" {
+		os.Exit(runMac(os.Args[1:]))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "mac" {
+		os.Exit(runMac(os.Args[2:]))
+	}
 	// Give plenty of fd headroom: the host opens many short-lived docker/exec
 	// connections, and a transient pile-up must not exhaust the table.
 	var lim unix.Rlimit

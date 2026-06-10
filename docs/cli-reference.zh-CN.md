@@ -27,6 +27,7 @@
 | `oort ssh [setup\|机器 [命令...]]` | `setup` 写入 `Host oort` 配置（客户机 sshd 投影到固定的 `localhost:2222`）——之后 `ssh oort` 和 **VS Code Remote-SSH** 直接可用；`oort ssh <机器>` 进入机器。密钥每次启动自动重注入 |
 | `oort disk [reclaim [--prune]]` | 查看磁盘占用 / 立即把客户机释放的空间还给 macOS（TRIM → APFS 打洞；`--prune` 先清理无用 docker 数据）。客户机内每日定时器也会自动执行 |
 | `oort fs [open\|mount\|umount]` | 客户机和每台机器的文件系统出现在 Finder 的 `~/Oort`（`guest/`、`machines/<名>/`）——agent 内置 NFS 导出，**免 sudo** 挂载，双向读写。重启/恢复自动重挂，stop/suspend 自动卸载 |
+| `mac <命令…>` *（客户机内）* | 在任意客户机 shell 里**直接跑 Mac 命令**——输出和退出码原样返回（`mac open https://…`、`mac pbpaste`、`mac say done`）。以你的 Mac 用户 + 登录 shell 执行；`--no-mac-exec` 可关闭 |
 | `oort domains enable\|route\|disable` | `*.oort.local` 域名直达容器/机器（见下） |
 | `oort help` | 显示帮助 |
 

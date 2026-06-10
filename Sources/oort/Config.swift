@@ -41,6 +41,8 @@ struct Config {
     /// `*.oort.local` DNS responder for container/machine domains (M7).
     /// 0 disables; macOS dispatches the queries via /etc/resolver/oort.local.
     var dnsPort: UInt16
+    /// Let the guest run commands on the Mac via the `mac` wrapper (M14).
+    var macExec: Bool
     /// vsock port inside the guest where dockerd is exposed (see guest/ setup).
     var guestVsockPort: UInt32
     /// Unix socket on macOS that the Docker CLI will talk to.
@@ -106,6 +108,8 @@ struct Config {
           --no-dynamic-memory      Don't actively balloon idle guest memory back.
           --dns-port <n>           UDP port for the *.oort.local resolver on
                                    127.0.0.1 (default: 5354; 0 disables).
+          --no-mac-exec            Don't let the guest run commands on the Mac
+                                   (the in-guest `mac` wrapper).
           --state <path>           Suspend/resume state file: restore from it when
                                    it exists (else cold-boot); SIGUSR1 suspends
                                    the VM back to it and exits.
@@ -135,6 +139,7 @@ struct Config {
         var portForward = true
         var dynamicMemory = true
         var dnsPort: UInt16 = 5354
+        var macExec = true
         var tcpForwards: [TCPForward] = []
         var consoleLog: URL?
         var nvram: URL?
@@ -164,6 +169,7 @@ struct Config {
             case "--no-port-forward": portForward = false
             case "--no-dynamic-memory": dynamicMemory = false
             case "--dns-port":   dnsPort = UInt16(try need(arg)) ?? dnsPort
+            case "--no-mac-exec": macExec = false
             case "--tcp-forward": tcpForwards.append(try parseTCPForward(need(arg)))
             case "--console-log": consoleLog = URL(fileURLWithPath: try need(arg))
             case "--nvram":      nvram = URL(fileURLWithPath: try need(arg))
@@ -203,6 +209,7 @@ struct Config {
             tcpForwards: tcpForwards,
             dynamicMemory: dynamicMemory,
             dnsPort: dnsPort,
+            macExec: macExec,
             guestVsockPort: vsockPort,
             hostSocketPath: socketPath,
             serialConsole: console,

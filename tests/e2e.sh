@@ -237,6 +237,11 @@ r=$(ssh -p 2222 -i "$SSHTMP/k" -o UserKnownHostsFile=/dev/null -o StrictHostKeyC
 check "$r" "SSHOK" "ssh into the guest via localhost:2222"
 rm -rf "$SSHTMP"
 
+echo "── M14 mac command ───────────────────────────"
+# Reverse execution: the guest runs a command ON the Mac and gets its output.
+check "$(gx 'mac sw_vers -productVersion' 2>/dev/null | tail -1)" "$(sw_vers -productVersion)" "guest 'mac' runs commands on the Mac"
+check "$(gx 'mac false >/dev/null 2>&1; echo $?' 2>/dev/null | tail -1)" "1" "mac propagates exit codes"
+
 echo "── M10 https (*.oort.local TLS) ──────────────"
 # Stage a throwaway CA in the guest; the agent then terminates TLS on :8443,
 # minting a per-SNI leaf and resolving the backend container by name. Tested

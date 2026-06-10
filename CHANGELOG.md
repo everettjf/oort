@@ -11,6 +11,13 @@ All notable changes to Oort. Dates are YYYY-MM-DD.
   `Host oort` block into `~/.ssh/config` — after that `ssh oort`, `scp`,
   and VS Code's Remote-SSH "oort" just work; `oort ssh <machine> [cmd]`
   shells into a machine. Verified live (ubuntu + root + machine + sftp).
+- **`mac` — run Mac commands from inside the guest** (OrbStack's reverse
+  direction): `mac open https://…`, `mac pbpaste`, `mac say done` from any
+  guest shell — output streams back and the exit code propagates. The engine
+  serves a guest-reachable vsock port (VZVirtioSocketListener); the guest
+  client is the agent binary in client mode behind a `mac` symlink. Runs as
+  your Mac user via your login shell — same trust model as OrbStack's `mac`;
+  `--no-mac-exec` disables it.
 - **Robustness sweep from running the full fresh-image suite end to end:**
   `build-image` now clears stale disk-image holders first (a force-killed
   engine orphans its VZ XPC child, which keeps a byte lock — "Failed to lock

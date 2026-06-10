@@ -93,6 +93,8 @@ write_files:
       rm -rf docker docker.tgz
       # Stage the compiled guest agent from the share.
       [ -f /mnt/mac/oort-guest ] && install -m0755 /mnt/mac/oort-guest /usr/local/bin/oort-guest
+      # `mac <cmd>` — run a command on the Mac (M14); same binary, client mode.
+      ln -sf /usr/local/bin/oort-guest /usr/local/bin/mac
       echo "oort: docker ${V} installed"
 
   # Wait (bounded) for the default route before dockerd installs its container

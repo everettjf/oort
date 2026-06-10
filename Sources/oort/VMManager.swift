@@ -12,6 +12,7 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
     private var portForwarder: PortForwarder?
     private var memoryManager: MemoryManager?
     private var dnsResponder: DNSResponder?
+    private var macExec: MacExec?
     private var configuredMemory: UInt64 = 0
     private var diskLock: DiskLock?
 
@@ -181,6 +182,12 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
             let dns = DNSResponder(dockerSocketPath: cfg.hostSocketPath, port: cfg.dnsPort)
             dns.start()
             dnsResponder = dns
+        }
+
+        if cfg.macExec {
+            let me = MacExec()
+            me.attach(to: device)
+            macExec = me
         }
 
         if cfg.dynamicMemory,
