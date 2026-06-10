@@ -138,34 +138,24 @@ final class PortForwarder {
         }
     }
 
-    private func splice(_ a: Int32, _ b: Int32, hold: VZVirtioSocketConnection) {
+    /// Splice with the same discipline as DockerSocketProxy: the client→guest
+    /// direction half-closes on clean EOF (writes into the vsock fd are
+    /// backpressured per-connection), while the guest→client direction goes
+    /// through Relays.drain — the vsock fd MUST always be drained, or one
+    /// stalled client freezes VZ's whole serial vsock device queue.
+    private func splice(_ client: Int32, _ guest: Int32, hold: VZVirtioSocketConnection) {
         let once = OnceFlag()
-        let teardown = { once.run { shutdown(a, SHUT_RDWR); shutdown(b, SHUT_RDWR) } }
+        let teardown = { once.run { shutdown(client, SHUT_RDWR); shutdown(guest, SHUT_RDWR) } }
         let group = DispatchGroup()
         group.enter(); group.enter()
-        copy(a, b) { teardown(); group.leave() }
-        copy(b, a) { teardown(); group.leave() }
-        group.notify(queue: .global()) { close(a); close(b); _ = hold }
+        copy(client, guest, onEOF: { shutdown(guest, SHUT_WR) }, onBrokenPipe: teardown) { group.leave() }
+        Relays.drain(from: guest, to: client, onEOF: teardown, onStall: teardown) { group.leave() }
+        group.notify(queue: .global()) { close(client); close(guest); _ = hold }
     }
 
-    private func copy(_ src: Int32, _ dst: Int32, done: @escaping () -> Void) {
-        Thread.detachNewThread {
-            let n = 64 * 1024
-            let buf = UnsafeMutableRawPointer.allocate(byteCount: n, alignment: 1)
-            defer { buf.deallocate(); done() }
-            while true {
-                let r = read(src, buf, n)
-                if r < 0 { if errno == EINTR { continue }; break }
-                if r == 0 { break }
-                var off = 0
-                while off < r {
-                    let w = write(dst, buf + off, r - off)
-                    if w < 0 { if errno == EINTR { continue }; break }
-                    off += w
-                }
-                if off < r { break }
-            }
-        }
+    private func copy(_ src: Int32, _ dst: Int32, onEOF: @escaping () -> Void,
+                      onBrokenPipe: @escaping () -> Void, done: @escaping () -> Void) {
+        Thread.detachNewThread { Relays.blockingCopy(from: src, to: dst, onEOF: onEOF, onBrokenPipe: onBrokenPipe, onDone: done) }
     }
 
     // MARK: - Docker API: list published TCP ports

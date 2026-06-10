@@ -116,11 +116,16 @@ final class DockerSocketProxy {
         let box = VZVirtioSocketConnectionBox(connection)
         lock.lock(); liveConnections.insert(box); lock.unlock()
 
-        // When EITHER direction finishes (EOF or error), tear down BOTH fds so
-        // the other relay's blocking read() is woken immediately. Without this,
-        // an HTTP keep-alive peer that never sends EOF would leave one relay
-        // blocked forever, leaking the fd and the vsock connection — which
-        // eventually exhausts the virtio-socket device and wedges the proxy.
+        // The CLIENT (unix socket) side honours half-close: when the CLI stops
+        // sending (request done) we shutdown only the guest's write direction…
+        // EXCEPT that the guest side here is a VZ vsock fd, and leaving it
+        // half-open while its peer floods can wedge VZ's socket pump on the VM
+        // queue (observed live: one `…| head -1` client froze every vsock
+        // connect — docker, agent, balloon — until restart). So the guest→CLI
+        // EOF (dockerd finished: response fully relayed) tears down BOTH ends;
+        // only the CLI→guest EOF half-closes, which is exactly the direction
+        // hijacked/attach streams need (the CLI half-closes its request side
+        // long before the container's output has come back).
         let teardownOnce = OnceFlag()
         let teardown = {
             teardownOnce.run {
@@ -132,8 +137,13 @@ final class DockerSocketProxy {
         let done = DispatchGroup()
         done.enter(); done.enter()
 
-        relay(from: clientFD, to: guestFD) { teardown(); done.leave() }   // CLI → guest
-        relay(from: guestFD, to: clientFD) { teardown(); done.leave() }   // guest → CLI
+        // CLI → guest: clean EOF half-closes the guest side (keep reply path open).
+        relay(from: clientFD, to: guestFD, onEOF: { shutdown(guestFD, SHUT_WR) },
+              onBrokenPipe: teardown) { done.leave() }
+        // guest → CLI: MUST always drain the vsock fd (see Relays below), and a
+        // clean guest EOF means the response is complete — nothing left to wait for.
+        Relays.drain(from: guestFD, to: clientFD, onEOF: teardown,
+                     onStall: teardown) { done.leave() }
 
         done.notify(queue: .global()) { [weak self] in
             close(clientFD)
@@ -142,27 +152,16 @@ final class DockerSocketProxy {
         }
     }
 
-    /// Copy bytes one direction until EOF/error, then run `onClose` (which tears
-    /// down both fds). Full-duplex teardown — not a half-close — so neither relay
-    /// can block indefinitely on a keep-alive connection.
-    private func relay(from src: Int32, to dst: Int32, onClose: @escaping () -> Void) {
-        Thread.detachNewThread {
-            let bufSize = 64 * 1024
-            let buf = UnsafeMutableRawPointer.allocate(byteCount: bufSize, alignment: 1)
-            defer { buf.deallocate(); onClose() }
-            while true {
-                let n = read(src, buf, bufSize)
-                if n < 0 { if errno == EINTR { continue }; break }
-                if n == 0 { break } // EOF
-                var off = 0
-                while off < n {
-                    let w = write(dst, buf + off, n - off)
-                    if w < 0 { if errno == EINTR { continue }; break }
-                    off += w
-                }
-                if off < n { break }
-            }
-        }
+    /// Copy bytes one direction until EOF/error. Clean EOF runs `onEOF`; a
+    /// read/write failure runs `onBrokenPipe`. `onDone` always runs last.
+    /// Used only for the host→guest direction — writes into the vsock fd are
+    /// safely backpressured per-connection by the guest's own flow control.
+    /// EAGAIN-tolerant: Relays.drain marks the shared client fd O_NONBLOCK
+    /// (a per-file-description flag), so reads here may need to poll.
+    private func relay(from src: Int32, to dst: Int32,
+                       onEOF: @escaping () -> Void,
+                       onBrokenPipe: @escaping () -> Void, onDone: @escaping () -> Void) {
+        Thread.detachNewThread { Relays.blockingCopy(from: src, to: dst, onEOF: onEOF, onBrokenPipe: onBrokenPipe, onDone: onDone) }
     }
 
     private func errnoString() -> String { String(cString: strerror(errno)) }

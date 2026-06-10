@@ -14,6 +14,12 @@ do {
     let cfg = try Config.parse(args)
     let manager = VMManager(cfg)
 
+    // A relay writing to a peer that just vanished raises SIGPIPE, whose
+    // default action KILLS the engine (took the whole VM down once half-close
+    // splicing widened that window). Daemons ignore it; writes then fail with
+    // EPIPE, which every relay already handles.
+    signal(SIGPIPE, SIG_IGN)
+
     // Graceful Ctrl-C: ask the guest to shut down cleanly.
     let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
     sigint.setEventHandler {

@@ -128,7 +128,12 @@ func serve(port uint32, handler func(*os.File)) {
 	}
 }
 
-// handleDocker splices a vsock connection to the Docker Unix socket.
+// handleDocker splices a vsock connection to the Docker Unix socket with
+// HALF-CLOSE propagation: when one direction hits EOF, only the destination's
+// write side is shut down, so the opposite direction can finish draining.
+// Closing both fds on the first EOF (the old behaviour) raced hijacked/attach
+// streams — `docker run --rm … echo hi` lost its output because the client
+// half-closed the request side before the container's stdout came back.
 func handleDocker(vconn *os.File) {
 	defer vconn.Close()
 	dconn, err := net.Dial("unix", dockerSock)
@@ -136,14 +141,19 @@ func handleDocker(vconn *os.File) {
 		return
 	}
 	defer dconn.Close()
-	// Copy both ways; when either direction ends, closing both fds unblocks
-	// the other copy — no half-open leaks on keep-alive connections.
+	uconn := dconn.(*net.UnixConn)
 	done := make(chan struct{}, 2)
-	go func() { io.Copy(dconn, vconn); done <- struct{}{} }()
-	go func() { io.Copy(vconn, dconn); done <- struct{}{} }()
+	go func() {
+		io.Copy(dconn, vconn)                          // host → dockerd
+		uconn.CloseWrite()                             // propagate EOF to dockerd
+		done <- struct{}{}
+	}()
+	go func() {
+		io.Copy(vconn, dconn)                          // dockerd → host
+		unix.Shutdown(int(vconn.Fd()), unix.SHUT_WR)   // propagate EOF to host
+		done <- struct{}{}
+	}()
 	<-done
-	vconn.Close()
-	dconn.Close()
 	<-done
 }
 
@@ -167,13 +177,23 @@ func handleTCPForward(conn *os.File) {
 		return
 	}
 	defer dst.Close()
+	tconn := dst.(*net.TCPConn)
 	done := make(chan struct{}, 2)
+	// Half-close propagation, like handleDocker — streaming protocols through a
+	// forwarded port (websockets, anything that half-closes) keep their reply
+	// path open until BOTH directions are done.
 	// r may hold bytes already read past the line; draining r (not conn) preserves them.
-	go func() { io.Copy(dst, r); done <- struct{}{} }()
-	go func() { io.Copy(conn, dst); done <- struct{}{} }()
+	go func() {
+		io.Copy(dst, r)
+		tconn.CloseWrite()
+		done <- struct{}{}
+	}()
+	go func() {
+		io.Copy(conn, dst)
+		unix.Shutdown(int(conn.Fd()), unix.SHUT_WR)
+		done <- struct{}{}
+	}()
 	<-done
-	conn.Close()
-	dst.Close()
 	<-done
 }
 
