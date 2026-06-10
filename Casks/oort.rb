@@ -6,8 +6,8 @@
 # still need that repo cloned and a golden image built (`oort build-image`).
 # A fully self-contained app is on the roadmap (docs/packaging.md).
 cask "oort" do
-  version "0.1.0"
-  sha256 "fbcdfae0b0156750cc340a58d1f0f294c57826ec478931af416dae1cbe54f970"
+  version "0.2.0"
+  sha256 "fdbe5f48c2c41fde0f14a0936e3ba9f5440d82aa2f3964079104738316a0c169"
 
   url "https://github.com/everettjf/oort/releases/download/v#{version}/oort-#{version}.dmg"
   name "oort"
