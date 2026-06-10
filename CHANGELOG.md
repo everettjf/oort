@@ -18,6 +18,15 @@ All notable changes to Oort. Dates are YYYY-MM-DD.
   client is the agent binary in client mode behind a `mac` symlink. Runs as
   your Mac user via your login shell — same trust model as OrbStack's `mac`;
   `--no-mac-exec` disables it.
+- **Fix: golden images could bake a kernel that can't load its own modules.**
+  The zram step's apt can upgrade kernel+modules to a NEWER REBUILD of the
+  same version string (6.8.0-117.X → .Y); staging the direct-boot kernel
+  while dpkg was mid-replace baked an old vmlinuz next to new /lib/modules —
+  every module load then failed with "Unknown symbol" (this killed
+  nf_tables→dockerd outright, and is the real story behind the earlier
+  vmw_vsock_virtio_transport failures). build-image now waits for apt/dpkg
+  to go completely quiet before reading /boot, and drops a stale
+  images/kernel-Image (forcing consistent EFI boot) when it can't.
 - **Robustness sweep from running the full fresh-image suite end to end:**
   `build-image` now clears stale disk-image holders first (a force-killed
   engine orphans its VZ XPC child, which keeps a byte lock — "Failed to lock

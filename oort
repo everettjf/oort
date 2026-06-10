@@ -429,15 +429,25 @@ cmd_build_image() {
   # `oort start` boots these via VZLinuxBootLoader (skipping EFI+GRUB), falling
   # back to EFI if absent. A custom-built Image can replace kernel-Image later.
   printf "    staging kernel for direct boot"
-  curl -s --max-time 40 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
-    'mountpoint -q /mnt/mac || mount -t virtiofs mac /mnt/mac; zcat /boot/vmlinuz-$(uname -r) > /mnt/mac/kernel-Image; cp /boot/initrd.img-$(uname -r) /mnt/mac/kernel-initrd; sync' \
+  # CRITICAL ordering: the zram step's apt can upgrade the kernel+modules to a
+  # NEWER REBUILD of the same version string (6.8.0-117.X → .Y). Staging while
+  # dpkg is mid-replace bakes an OLD vmlinuz next to NEW /lib/modules — every
+  # module load then fails with "Unknown symbol" (this killed nf_tables→dockerd
+  # once, and vmw_vsock before that). Wait for apt/dpkg to go COMPLETELY quiet
+  # before reading /boot, and verify the initrd belongs to the same files.
+  curl -s --max-time 220 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
+    'i=0; while { pgrep -x apt-get || pgrep -x dpkg || fuser /var/lib/dpkg/lock-frontend; } >/dev/null 2>&1; do i=$((i+1)); [ $i -gt 90 ] && exit 0; sleep 2; done; mountpoint -q /mnt/mac || mount -t virtiofs mac /mnt/mac; zcat /boot/vmlinuz-$(uname -r) > /mnt/mac/kernel-Image; cp /boot/initrd.img-$(uname -r) /mnt/mac/kernel-initrd; sync' \
     http://localhost/ >/dev/null 2>&1 || true
   if [ -s "$SHARE/kernel-Image" ]; then
     mv -f "$SHARE/kernel-Image" "$HERE/images/kernel-Image"
     mv -f "$SHARE/kernel-initrd" "$HERE/images/kernel-initrd" 2>/dev/null || true
     echo " ok"
   else
-    echo " skipped (will EFI-boot)"
+    # No fresh kernel staged — a LEFTOVER images/kernel-Image from an earlier
+    # build may not match this golden's /lib/modules (the "Unknown symbol"
+    # mismatch). Drop it: EFI/GRUB always boots the matching kernel.
+    rm -f "$HERE/images/kernel-Image" "$HERE/images/kernel-initrd"
+    echo " skipped (will EFI-boot; removed stale kernel-Image)"
   fi
   # Quiesce the guest BEFORE stopping. The background zram step runs apt, which can
   # still be mid-install here and keeps systemd busy past the graceful-stop window —
