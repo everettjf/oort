@@ -4,6 +4,12 @@ All notable changes to Oort. Dates are YYYY-MM-DD.
 
 ## Unreleased
 
+- **`oort` docker context — the stock docker CLI just works.** `oort start`
+  registers/refreshes a `oort` context and auto-selects it when the current
+  context is `default` or its engine is dead (e.g. desktop-linux with Docker
+  Desktop closed) — never stealing a live one. `oort stop` restores the
+  previous context. No more `export DOCKER_HOST` (which still overrides
+  contexts when set).
 - **Instant resume — `oort suspend`.** Freezes the whole VM (RAM + devices) to
   `~/.oort/vmstate.bin` via VZ save/restore (macOS 14+); the next `oort start`
   resumes in **~1.2s** (cold boot: ~4.4s; OrbStack: ~1–2s cold) with running

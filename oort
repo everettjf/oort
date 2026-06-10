@@ -98,6 +98,43 @@ sync_dns_gvproxy() {
     "echo $b64 | base64 -d > /etc/resolv.conf" http://localhost/ >/dev/null 2>&1 || true
 }
 
+# Register/refresh a "oort" docker context so the stock docker CLI just works —
+# no DOCKER_HOST exporting (which, note, still overrides contexts when set).
+# Auto-select it only when the user is on "default" (never steal an explicit
+# choice like desktop-linux); `oort stop` switches back if we're current.
+setup_docker_context() {
+  command -v docker >/dev/null 2>&1 || return 0
+  if docker context inspect oort >/dev/null 2>&1; then
+    docker context update oort --docker "host=unix://$DOCKER_SOCK" >/dev/null 2>&1 || true
+  else
+    docker context create oort --docker "host=unix://$DOCKER_SOCK" \
+      --description "oort VM" >/dev/null 2>&1 || return 0
+  fi
+  local cur; cur="$(docker context show 2>/dev/null)"
+  [ "$cur" = oort ] && return 0
+  # Take over from "default", or from any context whose engine is DEAD (e.g.
+  # desktop-linux while Docker Desktop is closed) — but never steal a context
+  # whose daemon is actually answering.
+  if [ "$cur" = default ] || [ -z "$cur" ] \
+     || ! docker --context "$cur" info --format ok >/dev/null 2>&1; then
+    echo "${cur:-default}" > "$STATE/prev-context"
+    docker context use oort >/dev/null 2>&1 \
+      && echo "docker context: 'oort' selected — the docker CLI now talks to oort"
+  else
+    echo "docker context: 'oort' available (current: $cur is live — 'docker context use oort' to switch)"
+  fi
+}
+
+teardown_docker_context() {
+  command -v docker >/dev/null 2>&1 || return 0
+  if [ "$(docker context show 2>/dev/null)" = oort ]; then
+    local prev; prev="$(cat "$STATE/prev-context" 2>/dev/null)"
+    docker context use "${prev:-default}" >/dev/null 2>&1 \
+      && echo "docker context: back to '${prev:-default}'"
+  fi
+  return 0
+}
+
 # Mount the Mac home (VirtioFS tag "home") at the same absolute path inside the
 # guest, and persist it in fstab so later boots remount it without the agent.
 mount_home() {
@@ -206,6 +243,7 @@ cmd_start() {
       fi
       [ "${MOUNT_HOME:-0}" = 1 ] && mount_home
       if [ "${OORT_NET:-}" = gvproxy ]; then sync_dns_gvproxy; else sync_dns; fi
+      setup_docker_context
       # *.oort.local needs the container route, and the guest IP can change
       # across boots — remind rather than demand sudo mid-start.
       if [ -f "$DOMAINS_MARKER" ] && ! _route_ok; then
@@ -254,7 +292,8 @@ cmd_suspend() {
 }
 
 cmd_stop() {
-  if ! vm_running; then echo "oort not running"; rm -f "$PIDFILE"; _kill_gvproxy; return 0; fi
+  if ! vm_running; then echo "oort not running"; rm -f "$PIDFILE"; _kill_gvproxy; teardown_docker_context; return 0; fi
+  teardown_docker_context
   local pid; pid="$(cat "$PIDFILE")"
   printf "stopping (graceful)…"
   kill -INT "$pid" 2>/dev/null || true   # → VZ requestStop → guest powers off

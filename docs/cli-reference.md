@@ -19,7 +19,7 @@ lifecycle / exec / passthrough conveniences.
 | `oort exec <cmd...>` | Run a command in the guest (via the vsock agent) |
 | `oort shell` | Simple line-at-a-time guest shell |
 | `oort docker <args...>` | Run `docker` against the oort daemon |
-| `oort env` | Print `export DOCKER_HOST=...`; use `eval "$(oort env)"` |
+| `oort env` | Print `export DOCKER_HOST=...`; use `eval "$(oort env)"` — usually unnecessary: `oort start` registers a **`oort` docker context** and selects it when the current one is `default` or dead, so the stock `docker` CLI just works (`oort stop` restores the previous context; note an exported `DOCKER_HOST` always overrides contexts) |
 | `oort logs` | Tail the guest console log |
 | `oort build-image` | (Re)build the boot disk + cloud-init seed + cross-compile the agent |
 | `oort reset` | Restore the disk from the golden snapshot |

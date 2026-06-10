@@ -18,7 +18,7 @@
 | `oort exec <命令...>` | 在客户机里执行一条命令（经 vsock agent） |
 | `oort shell` | 简易交互式客户机 shell（逐行执行） |
 | `oort docker <参数...>` | 以 oort 守护进程为目标运行 `docker` |
-| `oort env` | 打印 `export DOCKER_HOST=...`，可 `eval "$(oort env)"` |
+| `oort env` | 打印 `export DOCKER_HOST=...`，可 `eval "$(oort env)"`——通常不再需要：`oort start` 会注册 **`oort` docker context** 并在当前 context 为 `default` 或已死时自动选中，原生 `docker` CLI 直接可用（`oort stop` 恢复原 context；注意已导出的 `DOCKER_HOST` 优先级高于 context） |
 | `oort logs` | tail 客户机控制台日志 |
 | `oort build-image` | （重新）构建启动盘 + cloud-init seed + 编译客户机 agent |
 | `oort domains enable\|route\|disable` | `*.oort.local` 域名直达容器/机器（需 sudo，见下） |

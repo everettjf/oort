@@ -45,6 +45,8 @@ up=n; for _ in $(seq 1 15); do
 done
 [ "$up" = y ] || { echo "VM/Docker did not come up — aborting"; "$ORB" stop >/dev/null 2>&1; exit 1; }
 ok "VM up, Docker reachable"
+docker context inspect oort >/dev/null 2>&1 && ok "docker context 'oort' registered" \
+  || bad "docker context 'oort' registered" "docker-context"
 
 # Container networking (the docker0 NAT path + DNS) takes a few seconds to settle
 # after a fresh boot — longer than the daemon itself. Warm it up before the
