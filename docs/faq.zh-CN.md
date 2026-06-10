@@ -71,6 +71,23 @@ go version
 - **DNS 问题**：cloud-init 已禁用 IPv6 并写死 `1.1.1.1`。若你的网络封锁 1.1.1.1，改 `cloud-init/user-data` 里的 resolver。
 - 想重新干净配置：`./oort build-image`（重建盘，cloud-init 会重跑）。
 
+### VM 在跑但 Docker 一直 "unreachable" —— 怎么进客户机排查？
+先 `oort doctor`：它能区分 VM / dockerd / agent 三类故障。如果**所有** vsock 端口都被复位
+（doctor 显示 Docker 和 Agent 都 down）而 VM 明明启动了，还可以走 SSH 进去——云镜像开了
+密码登录（用户 `ubuntu`，密码 `oort`），VZ NAT 会把客户机的 DHCP 租约登记在 Mac 上：
+
+```bash
+grep -A2 'name=oort' /var/db/dhcpd_leases   # 找 ip_address=192.168.64.x
+ssh ubuntu@192.168.64.x                      # 密码 oort
+journalctl -u oort-guest -n 50               # agent 日志
+lsmod | grep vsock                           # 传输层加载了吗？
+```
+
+实例：较新的 noble 云内核（6.8.0-117）不再自动加载 `vmw_vsock_virtio_transport` ——
+agent 在没有传输层的 vsock 核心上"正常"监听，宿主每个连接都收到 RST。现在 provisioning
+会写入 `/etc/modules-load.d/oort-vsock.conf` 固定加载；旧黄金镜像遇到同样症状时，客户机里
+`sudo modprobe vmw_vsock_virtio_transport` 可立即修复（之后 `oort build-image` 重建）。
+
 ### 启动很慢 / 每次都重装 Docker
 `oort build-image` 会重置磁盘并重新配置。**只 `oort start`（不 build-image）会复用已配置的盘**，几秒即起。日常用：
 

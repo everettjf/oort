@@ -78,6 +78,26 @@ First boot installs the static Docker engine online. Causes & checks:
   1.1.1.1, change the resolver in `cloud-init/user-data`.
 - To re-provision cleanly: `./oort build-image` (resets the disk; cloud-init reruns).
 
+### VM runs but Docker stays "unreachable" — how do I see inside the guest?
+`oort doctor` first: it tells VM / dockerd / agent apart. If **all** vsock ports reset
+(doctor shows Docker *and* Agent down) while the VM is clearly booted, you can still get
+in over SSH — the cloud image enables password auth (user `ubuntu`, password `oort`),
+and VZ NAT registers the guest's DHCP lease on the Mac:
+
+```bash
+grep -A2 'name=oort' /var/db/dhcpd_leases   # find ip_address=192.168.64.x
+ssh ubuntu@192.168.64.x                      # password: oort
+journalctl -u oort-guest -n 50               # agent logs
+lsmod | grep vsock                           # transport loaded?
+```
+
+Case study: on newer noble cloud kernels (6.8.0-117) the guest stopped autoloading
+`vmw_vsock_virtio_transport` — the agent listened happily on a transportless vsock
+core and every host connect got RST. Provisioning now pins the module via
+`/etc/modules-load.d/oort-vsock.conf`; if you hit the same signature on an old golden
+image, `sudo modprobe vmw_vsock_virtio_transport` inside the guest fixes it live
+(then rebuild with `oort build-image`).
+
 ### Startup is slow / it reinstalls Docker every time
 `oort build-image` resets the disk and re-provisions. **`oort start` alone (without build-image)
 reuses the provisioned disk** and boots in seconds. Day to day:

@@ -23,6 +23,13 @@ bootcmd:
   # Enable magic-sysrq now (the drop-in below makes it persist) so the guest
   # agent's guaranteed-clean poweroff works from the very first boot.
   - [ sysctl, -w, kernel.sysrq=1 ]
+  # The virtio-vsock transport's udev autoload is RACY on noble cloud kernels
+  # (seen flaky on 6.8.0-117): when it loses, the agent listens on a
+  # transportless vsock core and every host connect gets RST — provisioning
+  # then hangs with Docker "unreachable". Load it explicitly here for THIS
+  # (first) boot; the modules-load.d drop-in below covers all later boots
+  # (write_files lands after systemd-modules-load has already run).
+  - [ modprobe, vmw_vsock_virtio_transport ]
 
 write_files:
   # Cap how long systemd waits on units at shutdown so `oort stop` powers off
@@ -41,6 +48,16 @@ write_files:
     permissions: "0644"
     content: |
       kernel.sysrq = 1
+  # Load the virtio-vsock transport explicitly at every boot. On newer noble
+  # cloud kernels (seen on 6.8.0-117) the transport no longer autoloads on
+  # golden-image boots: the agent's listeners bind the transportless vsock core,
+  # so every host connect gets RST — Docker "unreachable" from macOS while
+  # everything inside the guest looks healthy (the silent total-failure mode).
+  # systemd-modules-load runs in early boot, well before the agent.
+  - path: /etc/modules-load.d/oort-vsock.conf
+    permissions: "0644"
+    content: |
+      vmw_vsock_virtio_transport
   # Auto-repair a dirty root filesystem at boot instead of dropping to a degraded
   # state where dockerd/the agent never start. Belongs in the kernel command line;
   # this GRUB drop-in is baked in by `update-grub` during golden-image provisioning
