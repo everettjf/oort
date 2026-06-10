@@ -65,7 +65,9 @@ $ oort exec 'uname -a'             # run a command inside the guest
 | 📁 **File sharing** | Your Mac home is mirrored into the guest at the same path, so `docker -v $PWD:/app` just works | ✅ |
 | 🧬 **Rosetta x86** | `linux/amd64` images run via Rosetta — far faster than QEMU | ✅ |
 | 🔌 **Port forwarding** | Container-published ports appear automatically on macOS `localhost` (event-driven) | ✅ |
-| 🪪 **`*.oort.local` domains** | `curl http://web.oort.local` reaches container "web" by name — any port, no `-p` (`oort domains enable`) | ✅ |
+| 🪪 **`*.oort.local` domains** | `curl http://web.oort.local` reaches container "web" by name — any port, no `-p` (`oort domains enable`); sudo-free with the one-time `oort net install` helper | ✅ |
+| 🔐 **Trusted HTTPS** | `https://web.oort.local` just works — local CA, per-name certs minted in-guest (`oort https enable`) | ✅ |
+| 🧰 **`oort debug`** | Toolbox shell into ANY container, even distroless — busybox joins its pid+net namespaces | ✅ |
 | 🧭 **Follows Mac DNS** | Guest/containers use the Mac's DNS resolvers — internal/VPN domains resolve | ✅ |
 | 🛰️ **`oort` CLI** | Lifecycle, `oort exec`, docker passthrough, `oort autostart` at login | ✅ |
 | 🌱 **Machine time-travel** | `snapshot` / `restore` / **`fork`** a whole Linux machine (git-for-environments — *OrbStack can't*) | ✅ |

@@ -22,6 +22,7 @@
 #   oort domains enable|disable  *.oort.local names for containers/machines
 #   oort k8s enable|disable    run Kubernetes (k3s) in the guest
 #   oort debug <container>     toolbox shell into ANY container (even distroless)
+#   oort https enable|disable  trusted https:// for *.oort.local (local CA, sudo once)
 #   oort machine ...           manage named Linux machines (create/list/shell/…)
 #   oort machine snapshot/restore/fork   time-travel: branch & roll back an env
 #   oort fastvol <name> [path] fast guest-disk volume for a hot dir (node_modules…)
@@ -694,6 +695,59 @@ cmd_machine() {
   esac
 }
 
+# HTTPS for *.oort.local (M10) — trusted https:// for any container.
+# A local CA is generated on the Mac and trusted once in the system keychain
+# (the only sudo); its material is staged into the guest, where the agent
+# terminates TLS for container-IP:443 (iptables REDIRECT → :8443), minting a
+# per-name leaf on the fly, and forwards plain HTTP to the container's :80.
+HTTPS_DIR="$STATE/https"
+cmd_https() {
+  case "${1:-status}" in
+    enable)
+      vm_running || { echo "start oort first ('oort start')"; exit 1; }
+      mkdir -p "$HTTPS_DIR"
+      if [ ! -f "$HTTPS_DIR/ca.pem" ]; then
+        echo "generating the oort local CA…"
+        openssl ecparam -name prime256v1 -genkey -noout -out "$HTTPS_DIR/ca.key" 2>/dev/null
+        openssl req -x509 -new -key "$HTTPS_DIR/ca.key" -sha256 -days 3650 \
+          -subj "/CN=oort local CA" -out "$HTTPS_DIR/ca.pem" 2>/dev/null
+        chmod 600 "$HTTPS_DIR/ca.key"
+      fi
+      echo "trusting the CA in the system keychain — sudo required (one-time):"
+      sudo security add-trusted-cert -d -r trustRoot \
+        -k /Library/Keychains/System.keychain "$HTTPS_DIR/ca.pem"
+      echo "staging the CA into the guest + restarting the agent…"
+      local certb64 keyb64
+      certb64=$(base64 < "$HTTPS_DIR/ca.pem" | tr -d '\n')
+      keyb64=$(base64 < "$HTTPS_DIR/ca.key" | tr -d '\n')
+      cmd_exec "mkdir -p /etc/oort/https && echo $certb64 | base64 -d > /etc/oort/https/ca.pem && echo $keyb64 | base64 -d > /etc/oort/https/ca.key && chmod 600 /etc/oort/https/ca.key && systemctl restart oort-guest && echo staged" >/dev/null 2>&1 || true
+      # the restart drops the connection serving the reply — verify instead
+      sleep 1
+      if cmd_exec 'ss -tln 2>/dev/null | grep -q 8443 && echo UP' | grep -q UP; then
+        echo "https enabled — try:  docker run -d --name web nginx && open https://web.oort.local"
+        [ -f "$DOMAINS_MARKER" ] || echo "(names need 'oort domains enable' too)"
+      else
+        echo "terminator didn't come up — check 'oort exec journalctl -u oort-guest -n 20'"
+        exit 1
+      fi
+      ;;
+    disable)
+      vm_running && cmd_exec 'rm -rf /etc/oort/https; iptables -t nat -D PREROUTING -i enp0s1 -d 172.17.0.0/16 -p tcp --dport 443 -j REDIRECT --to-ports 8443 2>/dev/null; systemctl restart oort-guest; echo done' >/dev/null 2>&1
+      sudo security delete-certificate -c "oort local CA" /Library/Keychains/System.keychain 2>/dev/null \
+        && echo "CA removed from the system keychain" || true
+      echo "https disabled"
+      ;;
+    *)
+      if [ -f "$HTTPS_DIR/ca.pem" ] && vm_running \
+         && cmd_exec 'ss -tln 2>/dev/null | grep -q 8443 && echo UP' 2>/dev/null | grep -q UP; then
+        echo "https: enabled (terminator on guest :8443, CA $HTTPS_DIR/ca.pem)"
+      else
+        echo "https: disabled (use 'oort https enable')"
+      fi
+      ;;
+  esac
+}
+
 # Debug shell into ANY container (M9) — OrbStack's `orb debug`, for oort.
 # Distroless/minimal images have no shell or tools; this drops you into a
 # busybox toolbox that JOINS the target's pid+net namespaces, so you get ps,
@@ -957,6 +1011,7 @@ case "${1:-help}" in
   domains)      shift; cmd_domains "$@";;
   k8s)          shift; cmd_k8s "$@";;
   debug)        shift; cmd_debug "$@";;
+  https)        shift; cmd_https "$@";;
   machine)      shift; cmd_machine "$@";;
   up)           shift; cmd_up "$@";;
   down)         shift; cmd_down "$@";;

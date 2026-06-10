@@ -4,6 +4,14 @@ All notable changes to Oort. Dates are YYYY-MM-DD.
 
 ## Unreleased
 
+- **HTTPS for `*.oort.local` — `oort https enable`.** Trusted
+  `https://web.oort.local` for any container, OrbStack-style: a local CA is
+  generated on the Mac and trusted once in the system keychain (the only
+  sudo); the guest agent terminates TLS for container-IP:443 (iptables
+  REDIRECT → :8443), mints a per-SNI leaf on the fly (so every name level
+  works — `api.myproj.oort.local` included), and forwards plain HTTP to the
+  container's :80. Verified in-guest: TLS handshake, CA chain validation,
+  arbitrary-SNI minting, backend-by-name resolution.
 - **`oort debug <container>` — toolbox shell into ANY container** (OrbStack's
   `orb debug`): a busybox toolbox joins the target's pid+net namespaces, so
   distroless/shell-less containers get ps/netstat/wget/vi against the live

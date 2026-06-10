@@ -64,6 +64,7 @@ func main() {
 		_ = unix.Setrlimit(unix.RLIMIT_NOFILE, &lim)
 	}
 	startHeartbeat() // touch a heartbeat file while healthy; the in-guest watchdog restarts us if it goes stale
+	serveHTTPS()     // *.oort.local TLS terminator — inert unless the CA is staged (M10)
 	var wg sync.WaitGroup
 	wg.Add(4)
 	go func() { defer wg.Done(); serve(dockerPort, handleDocker) }()

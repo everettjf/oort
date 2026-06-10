@@ -204,6 +204,20 @@ r=n; for _ in $(seq 1 15); do
 done
 check "$r" "y" "watchdog auto-recovers a wedged dockerd"
 
+echo "── M10 https (*.oort.local TLS) ──────────────"
+# Stage a throwaway CA in the guest; the agent then terminates TLS on :8443,
+# minting a per-SNI leaf and resolving the backend container by name. Tested
+# in-guest via a direct connect (the Mac-side REDIRECT path needs the sudo
+# route, which e2e can't take).
+gx 'mkdir -p /etc/oort/https && cd /etc/oort/https && openssl ecparam -name prime256v1 -genkey -noout -out ca.key 2>/dev/null && openssl req -x509 -new -key ca.key -sha256 -days 30 -subj "/CN=oort e2e CA" -out ca.pem 2>/dev/null && systemctl restart oort-guest && echo ok' >/dev/null 2>&1
+gdock rm -f e2etls >/dev/null 2>&1
+gdock run -d --name e2etls --platform linux/arm64 busybox:latest sh -c 'mkdir -p /w; echo TLSOK>/w/index.html; exec httpd -f -p 80 -h /w' >/dev/null 2>&1
+r=""; for _ in $(seq 1 12); do r=$(gx 'curl -s --cacert /etc/oort/https/ca.pem --resolve e2etls.oort.local:8443:127.0.0.1 https://e2etls.oort.local:8443/index.html' 2>/dev/null | tail -1); [ "$r" = TLSOK ] && break; sleep 1; done
+check "$r" "TLSOK" "https: TLS terminated, per-SNI cert, backend by name"
+gdock rm -f e2etls >/dev/null 2>&1
+gx 'rm -rf /etc/oort/https; systemctl restart oort-guest' >/dev/null 2>&1
+sleep 2   # let the agent settle before the next section
+
 echo "── M8 suspend/resume ─────────────────────────"
 # Freeze the VM mid-flight with a counting container, resume, and require BOTH
 # that the container kept its in-memory state (a cold boot would have left it

@@ -28,6 +28,7 @@ lifecycle / exec / passthrough conveniences.
 | `oort domains enable\|route\|disable` | `*.oort.local` names for containers/machines/compose services (sudo, see below) |
 | `oort k8s enable\|disable` | Run Kubernetes (k3s) in the guest |
 | `oort debug <container> [cmd...]` | Toolbox shell into ANY container, even distroless: busybox joins the target's pid+net namespaces; target rootfs at `/proc/1/root` |
+| `oort https enable\|disable` | Trusted `https://web.oort.local` for any container: local CA (trusted once, sudo), TLS terminated in-guest with per-name certs, forwarded to the container's :80. Needs `oort domains` |
 | `oort machine ...` | Manage named Linux machines (see below) |
 | `oort up [file]` | Bring up machines declared in `oort.yaml`/`.json` (env-as-code); runs each machine's one-time `setup` |
 | `oort down [file]` | Tear those machines down (`--purge` also drops their snapshots) |

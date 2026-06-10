@@ -23,6 +23,7 @@
 | `oort build-image` | （重新）构建启动盘 + cloud-init seed + 编译客户机 agent |
 | `oort net install\|uninstall\|status` | 一次性 root helper（仅此一次 sudo）：之后路由和 `*.oort.local` 全自动，再不需要 sudo |
 | `oort debug <容器> [命令...]` | 工具箱 shell 进入**任意**容器（包括 distroless）：busybox 加入目标的 pid+net 命名空间，目标根文件系统在 `/proc/1/root` |
+| `oort https enable\|disable` | 可信的 `https://web.oort.local`：本地 CA（一次 sudo 信任），客户机内终止 TLS、按域名动态签发证书、转发到容器 :80。需先 `oort domains` |
 | `oort domains enable\|route\|disable` | `*.oort.local` 域名直达容器/机器（见下） |
 | `oort help` | 显示帮助 |
 

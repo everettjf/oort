@@ -62,7 +62,9 @@ $ oort exec 'uname -a'             # 直接在客户机里执行命令
 | 📁 **文件共享** | Mac 家目录以相同路径镜像进客户机，`docker -v $PWD:/app` 直接可用 | ✅ |
 | 🧬 **Rosetta x86 翻译** | `linux/amd64` 镜像经 Rosetta 运行，远快于 QEMU | ✅ |
 | 🔌 **端口自动转发** | 容器发布端口自动出现在 macOS `localhost`（事件驱动） | ✅ |
-| 🪪 **`*.oort.local` 域名** | `curl http://web.oort.local` 按名字直达容器「web」——任意端口、无需 `-p`（`oort domains enable`） | ✅ |
+| 🪪 **`*.oort.local` 域名** | `curl http://web.oort.local` 按名字直达容器「web」——任意端口、无需 `-p`（`oort domains enable`）；装一次 `oort net install` 后全程免 sudo | ✅ |
+| 🔐 **可信 HTTPS** | `https://web.oort.local` 直接可用——本地 CA、客户机内按域名动态签发证书（`oort https enable`） | ✅ |
+| 🧰 **`oort debug`** | 工具箱 shell 进入**任意**容器（含 distroless）——busybox 加入其 pid+net 命名空间 | ✅ |
 | 🧭 **跟随 Mac DNS** | 客户机/容器用 Mac 的 DNS 解析器——内网/VPN 域名可解析 | ✅ |
 | 🛰️ **`oort` CLI** | 生命周期、`oort exec`、docker 透传、`oort autostart` 开机自启 | ✅ |
 | 🌱 **机器时间旅行** | `snapshot` / `restore` / **`fork`** 整台 Linux 机器（环境的 git——*OrbStack 做不到*） | ✅ |
