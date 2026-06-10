@@ -4,6 +4,13 @@ All notable changes to Oort. Dates are YYYY-MM-DD.
 
 ## Unreleased
 
+- **Suspend/resume hardening.** The stale-state guard now stamps the disk's
+  post-suspend mtime and requires an exact match (the old `-nt` comparison
+  raced VZ's final disk flush during the save, discarding good states). Also
+  root-caused the opaque restore "permission denied": macOS withholds the
+  state file's decryption key while the screen is LOCKED — saves work, but a
+  locked-session start falls back to a cold boot (now logged clearly; the e2e
+  suspend section auto-skips when locked).
 - **HTTPS for `*.oort.local` — `oort https enable`.** Trusted
   `https://web.oort.local` for any container, OrbStack-style: a local CA is
   generated on the Mac and trusted once in the system keychain (the only

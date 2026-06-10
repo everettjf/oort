@@ -11,7 +11,7 @@
 | 命令 | 说明 |
 |---|---|
 | `oort start` | 启动 VM（Docker + 文件共享 + Rosetta + 端口转发），等待 Docker 就绪并打印 `DOCKER_HOST`；若存在挂起状态则 **~1s 恢复**、容器原地存活 |
-| `oort suspend` | 把整台 VM（内存 + 设备）冻结到 `~/.oort/vmstate.bin` 后退出；下次 `oort start` 瞬间恢复，且自动校正客户机时钟 |
+| `oort suspend` | 把整台 VM（内存 + 设备）冻结到 `~/.oort/vmstate.bin` 后退出；下次 `oort start` 瞬间恢复，且自动校正客户机时钟。注意：macOS 在锁屏时不提供状态解密密钥——锁屏下启动会自动回退冷启动 |
 | `oort stop` | 干净关闭 VM |
 | `oort restart` | 先 stop 再 start |
 | `oort status` | 显示 VM 与 Docker 状态 |

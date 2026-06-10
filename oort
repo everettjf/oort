@@ -170,16 +170,18 @@ cmd_start() {
   extra+=(--dns-port "$DNS_PORT")   # *.oort.local resolver (OORT_DNS_PORT; 0 disables)
   # Suspend/resume (M8): always hand the engine the state path — it restores
   # from it when present (sub-second start, containers intact) and SIGUSR1
-  # (oort suspend) saves back to it. Stale-state guard: the file is only valid
-  # for the exact disk it was saved against; discard it if the disk is newer
-  # (build-image/reset/another boot would corrupt the resumed fs).
+  # (oort suspend) saves back to it. Stale-state guard: the state is only
+  # valid for the exact disk bytes it was saved against, so `oort suspend`
+  # stamps the disk's post-suspend mtime and we require an exact match here —
+  # any later write (build-image, reset, another boot) invalidates it.
+  # (Comparing mtimes with -nt raced VZ's final disk flush during the save.)
   local resumed=0
   if [ -f "$VMSTATE" ]; then
-    if [ "$DISK" -nt "$VMSTATE" ]; then
-      echo "(discarding stale suspend state — disk image changed)"
-      rm -f "$VMSTATE"
-    else
+    if [ -f "$VMSTATE.stamp" ] && [ "$(stat -f %m "$DISK" 2>/dev/null)" = "$(cat "$VMSTATE.stamp")" ]; then
       resumed=1
+    else
+      echo "(discarding stale suspend state — disk image changed)"
+      rm -f "$VMSTATE" "$VMSTATE.stamp"
     fi
   fi
   extra+=(--state "$VMSTATE")
@@ -243,6 +245,7 @@ cmd_start() {
         curl -s --max-time 8 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
           "date -u -s @$(date -u +%s) >/dev/null 2>&1; hwclock --systohc 2>/dev/null; echo clocked" \
           http://localhost/ >/dev/null 2>&1 || true
+        rm -f "$VMSTATE.stamp"   # the engine consumed (deleted) the state itself
       fi
       [ "${MOUNT_HOME:-0}" = 1 ] && mount_home
       if [ "${OORT_NET:-}" = gvproxy ]; then sync_dns_gvproxy; else sync_dns; fi
@@ -287,6 +290,9 @@ cmd_suspend() {
       # The engine is gone — but only call it a suspend if the state actually
       # landed (an engine without the SIGUSR1 handler dies on the signal).
       if [ -s "$VMSTATE" ]; then
+        # Stamp the disk as it is NOW (post-suspend, fully flushed): `oort
+        # start` resumes only on an exact mtime match.
+        stat -f %m "$DISK" > "$VMSTATE.stamp" 2>/dev/null
         echo " done."
         ls -lh "$VMSTATE" | awk '{print "  state: "$NF" ("$5") - next start resumes instantly"}'
         return 0

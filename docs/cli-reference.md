@@ -12,7 +12,7 @@ lifecycle / exec / passthrough conveniences.
 | Command | Description |
 |---|---|
 | `oort start` | Boot the VM (Docker + file sharing + Rosetta + port forwarding); wait until Docker is ready and print `DOCKER_HOST`. If a suspended state exists, **resumes it in ~1s** with containers still running |
-| `oort suspend` | Freeze the whole VM (RAM + devices) to `~/.oort/vmstate.bin` and exit; the next `oort start` resumes instantly. The guest clock is re-stepped on resume |
+| `oort suspend` | Freeze the whole VM (RAM + devices) to `~/.oort/vmstate.bin` and exit; the next `oort start` resumes instantly. The guest clock is re-stepped on resume. Note: macOS withholds the state's decryption key while the screen is locked — a locked-session start falls back to a cold boot |
 | `oort stop` | Cleanly shut the VM down |
 | `oort restart` | stop then start |
 | `oort status` | Show VM and Docker status |

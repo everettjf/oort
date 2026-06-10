@@ -222,6 +222,22 @@ echo "── M8 suspend/resume ────────────────�
 # Freeze the VM mid-flight with a counting container, resume, and require BOTH
 # that the container kept its in-memory state (a cold boot would have left it
 # stopped — no restart policy) AND that the resume was actually fast.
+# NOTE: macOS keeps the state file's decryption key unavailable while the
+# screen is locked ("permission denied" on restore, cold-boot fallback) — so
+# this section only runs in an unlocked session.
+if /usr/bin/python3 -c "
+import ctypes, ctypes.util, sys
+q = ctypes.CDLL('/System/Library/Frameworks/Quartz.framework/Quartz')
+cf = ctypes.CDLL(ctypes.util.find_library('CoreFoundation'))
+q.CGSessionCopyCurrentDictionary.restype = ctypes.c_void_p
+cf.CFCopyDescription.restype = ctypes.c_void_p
+d = q.CGSessionCopyCurrentDictionary()
+desc = ctypes.c_void_p(cf.CFCopyDescription(ctypes.c_void_p(d)))
+buf = ctypes.create_string_buffer(4096)
+cf.CFStringGetCString(desc, buf, 4096, 0x08000100)
+sys.exit(0 if 'ScreenIsLocked = 1' in buf.value.decode() else 1)" 2>/dev/null; then
+  echo "  SKIP suspend/resume (screen locked — macOS withholds the state decryption key)"
+else
 gdock rm -f e2esus >/dev/null 2>&1
 gdock run -d --name e2esus --platform linux/arm64 busybox:latest sh -c 'i=0; while :; do i=$((i+1)); echo $i > /c; sleep 1; done' >/dev/null 2>&1
 sleep 3
@@ -236,6 +252,7 @@ post=$(gdock exec e2esus cat /c 2>/dev/null | tr -dc 0-9)
 check "$([ -n "$pre" ] && [ -n "$post" ] && [ "$post" -gt "$pre" ] && echo y || echo n)" "y" "container survived suspend/resume with state (pre=$pre post=$post)"
 check "$([ "$dt" -le 3 ] && echo y || echo n)" "y" "resume is fast (${dt}s ≤ 3s)"
 gdock rm -f e2esus >/dev/null 2>&1
+fi
 
 echo "── restart on a mutated disk ─────────────────"
 # The top Phase-0 reliability bug: a clean cold boot works, but restarting after

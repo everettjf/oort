@@ -50,7 +50,16 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
                 self.vm.restoreMachineStateFrom(url: stateURL) { err in
                     if let err {
                         // Unsupported device / config drift / stale file — cold-boot.
-                        Log.warn("restore failed (\(err.localizedDescription)); cold-booting")
+                        // "permission denied" specifically = the state file's
+                        // decryption key is unavailable while the SCREEN IS
+                        // LOCKED (macOS data protection); the state itself is
+                        // fine, but by the time the user unlocks we're already
+                        // cold-booting, so it can't be kept for later.
+                        var detail = err.localizedDescription
+                        if detail.contains("permission denied") {
+                            detail += " — usually the screen is locked; resume needs an unlocked session"
+                        }
+                        Log.warn("restore failed (\(detail)); cold-booting")
                         try? FileManager.default.removeItem(at: stateURL)
                         self.coldStart()
                         return
