@@ -17,8 +17,9 @@
 #   oort build-image           build + provision the disk, snapshot a golden image
 #   oort build-kernel          build a custom minimal kernel in the guest, use it for direct boot
 #   oort reset                 restore the disk from the golden snapshot
-#   oort route enable|disable  reach containers by their docker0 IP (sudo)
-#   oort domains enable|disable  *.oort.local names for containers/machines (sudo)
+#   oort net install           one-time root helper: routes/domains with no sudo
+#   oort route enable|disable  reach containers by their docker0 IP
+#   oort domains enable|disable  *.oort.local names for containers/machines
 #   oort k8s enable|disable    run Kubernetes (k3s) in the guest
 #   oort machine ...           manage named Linux machines (create/list/shell/…)
 #   oort machine snapshot/restore/fork   time-travel: branch & roll back an env
@@ -245,9 +246,15 @@ cmd_start() {
       if [ "${OORT_NET:-}" = gvproxy ]; then sync_dns_gvproxy; else sync_dns; fi
       setup_docker_context
       # *.oort.local needs the container route, and the guest IP can change
-      # across boots — remind rather than demand sudo mid-start.
-      if [ -f "$DOMAINS_MARKER" ] && ! _route_ok; then
-        echo "(*.oort.local: container route missing — run 'oort domains route')"
+      # across boots. With the net helper installed, refresh it automatically
+      # (no sudo); otherwise remind rather than demand sudo mid-start.
+      if [ -f "$DOMAINS_MARKER" ]; then
+        if helper_installed; then
+          local gip; gip="$(_guest_ip)"
+          [ -n "$gip" ] && net_request "up $gip $DNS_PORT" >/dev/null
+        elif ! _route_ok; then
+          echo "(*.oort.local: container route missing — run 'oort domains route')"
+        fi
       fi
       echo; cmd_env; return 0
     fi
@@ -723,10 +730,71 @@ cmd_k8s() {
   esac
 }
 
+# Privileged net helper (M9) — sudo-free container networking, OrbStack-style.
+# A root LaunchDaemon (installed ONCE with sudo) watches $NET_REQUEST and applies
+# the container route + /etc/resolver/oort.local; after that `oort start` keeps
+# the route fresh automatically and domains/route need no sudo ever again.
+HELPER_LABEL="dev.oort.nethelper"
+HELPER_BIN="/Library/PrivilegedHelperTools/oort-nethelper.sh"
+HELPER_PLIST="/Library/LaunchDaemons/$HELPER_LABEL.plist"
+NET_REQUEST="$STATE/net-request"
+helper_installed() { [ -f "$HELPER_PLIST" ] && [ -f "$HELPER_BIN" ]; }
+
+# Write a request and wait (briefly) for the root helper to acknowledge it.
+net_request() {
+  rm -f "$NET_REQUEST.status"
+  echo "$*" > "$NET_REQUEST"
+  for _ in $(seq 1 20); do [ -f "$NET_REQUEST.status" ] && break; sleep 0.25; done
+  [ -f "$NET_REQUEST.status" ] && sed 's/^/  helper: /' "$NET_REQUEST.status" || echo "  helper: no response (see 'oort net status')"
+}
+
+cmd_net() {
+  case "${1:-status}" in
+    install)
+      echo "installing the oort privileged net helper (sudo, ONE time)…"
+      sudo install -d -o root -g wheel -m 0755 /Library/PrivilegedHelperTools
+      sudo install -o root -g wheel -m 0755 "$HERE/tools/oort-nethelper.sh" "$HELPER_BIN"
+      sudo tee "$HELPER_PLIST" >/dev/null <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$HELPER_LABEL</string>
+  <key>ProgramArguments</key><array><string>$HELPER_BIN</string></array>
+  <key>EnvironmentVariables</key>
+  <dict><key>OORT_NET_REQUEST</key><string>$NET_REQUEST</string></dict>
+  <key>WatchPaths</key><array><string>$NET_REQUEST</string></array>
+  <key>RunAtLoad</key><true/>
+</dict>
+</plist>
+PLIST
+      sudo launchctl bootout "system/$HELPER_LABEL" 2>/dev/null || true
+      sudo launchctl bootstrap system "$HELPER_PLIST"
+      echo "installed — container route + *.oort.local resolver now apply with no sudo."
+      vm_running && { local gip; gip="$(_guest_ip)"; [ -n "$gip" ] && net_request "up $gip $DNS_PORT"; }
+      ;;
+    uninstall)
+      helper_installed && net_request down >/dev/null
+      sudo launchctl bootout "system/$HELPER_LABEL" 2>/dev/null || true
+      sudo rm -f "$HELPER_PLIST" "$HELPER_BIN"
+      echo "helper uninstalled (route + resolver removed)"
+      ;;
+    *)
+      if helper_installed; then
+        echo "helper: installed"
+        [ -f "$NET_REQUEST.status" ] && sed 's/^/  last: /' "$NET_REQUEST.status"
+      else
+        echo "helper: not installed — 'oort net install' (one sudo) makes routes/domains automatic"
+      fi
+      ;;
+  esac
+}
+
 # Reach containers by their docker0 IP from macOS (M5, opt-in). The host can
 # already reach the guest IP over VZ NAT; this adds a route so 172.17.0.0/16
 # (Docker's default bridge) goes via the guest, which forwards to the container.
-# NOTE: needs sudo for `route`; re-run after a restart (the guest IP can change).
+# NOTE: needs sudo for `route` unless the net helper is installed; re-run after
+# a restart (the guest IP can change) — with the helper, `oort start` does it.
 _guest_ip() {
   curl -s --max-time 8 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
     'ip -4 -o addr show enp0s1 | grep -oE "192\.168\.[0-9]+\.[0-9]+" | head -1' http://localhost/ 2>/dev/null
@@ -738,7 +806,12 @@ _route_add() {
   vm_running || { echo "start oort first ('oort start')"; exit 1; }
   local gip; gip="$(_guest_ip)"
   [ -n "$gip" ] || { echo "couldn't read the guest IP (is the agent up?)"; exit 1; }
-  echo "routing 172.17.0.0/16 via the guest ($gip) — sudo required:"
+  if helper_installed; then
+    echo "routing 172.17.0.0/16 via the guest ($gip) — via the net helper:"
+    net_request "up $gip $DNS_PORT"
+    return 0
+  fi
+  echo "routing 172.17.0.0/16 via the guest ($gip) — sudo required ('oort net install' makes this automatic):"
   # Replace any stale route first (the guest IP can change across boots).
   sudo route -n delete -net 172.17.0.0/16 >/dev/null 2>&1 || true
   sudo route -n add -net 172.17.0.0/16 "$gip" >/dev/null && \
@@ -767,9 +840,13 @@ cmd_domains() {
   case "${1:-status}" in
     enable)
       vm_running || { echo "start oort first ('oort start')"; exit 1; }
-      echo "pointing macOS at the oort resolver ($RESOLVER_FILE) — sudo required:"
-      printf 'nameserver 127.0.0.1\nport %s\n' "$DNS_PORT" | sudo tee "$RESOLVER_FILE" >/dev/null
-      _route_add
+      if helper_installed; then
+        _route_add   # the helper applies route AND resolver in one request
+      else
+        echo "pointing macOS at the oort resolver ($RESOLVER_FILE) — sudo required ('oort net install' makes this automatic):"
+        printf 'nameserver 127.0.0.1\nport %s\n' "$DNS_PORT" | sudo tee "$RESOLVER_FILE" >/dev/null
+        _route_add
+      fi
       touch "$DOMAINS_MARKER"
       echo "domains enabled — containers and machines are reachable by name:"
       echo "  docker run -d --name web nginx && curl http://web.oort.local"
@@ -779,8 +856,12 @@ cmd_domains() {
       ;;
     route) _route_add;;
     disable)
-      sudo rm -f "$RESOLVER_FILE"
-      sudo route -n delete -net 172.17.0.0/16 >/dev/null 2>&1 || true
+      if helper_installed; then
+        net_request down
+      else
+        sudo rm -f "$RESOLVER_FILE"
+        sudo route -n delete -net 172.17.0.0/16 >/dev/null 2>&1 || true
+      fi
       rm -f "$DOMAINS_MARKER"
       echo "domains disabled (resolver file and route removed)"
       ;;
@@ -844,6 +925,7 @@ case "${1:-help}" in
   build-kernel) shift; cmd_build_kernel "$@";;
   reset)        shift; cmd_reset "$@";;
   route)        shift; cmd_route "$@";;
+  net)          shift; cmd_net "$@";;
   domains)      shift; cmd_domains "$@";;
   k8s)          shift; cmd_k8s "$@";;
   machine)      shift; cmd_machine "$@";;

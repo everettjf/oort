@@ -40,9 +40,12 @@ docker run -d --name web nginx
 curl http://web.oort.local        # 不需要发布端口
 ```
 
-路由跟随客户机 IP，VM 重启后 IP 可能变化——`oort start` 会提醒，
-`oort domains route` 一条命令刷新（sudo）。`oort domains` 查看状态，`disable` 移除。
-注意：需要默认的 VZ NAT 网络（暂不支持 `OORT_NET=gvproxy`）。
+路由跟随客户机 IP，VM 重启后 IP 可能变化。装上**网络 helper**（`oort net install`，
+一辈子只需这一次 sudo）后，`oort start` 自动刷新路由和 resolver，再也不需要 sudo；
+不装则 `oort start` 会提醒、`oort domains route` 手动刷新（sudo）。helper 是一个极小的
+root LaunchDaemon，监听 `~/.oort/net-request`，只执行两种严格校验过的操作
+（172.17/16 路由 + resolver 文件），源码见 `tools/oort-nethelper.sh`。
+`oort domains` 查看状态，`disable` 移除。注意：需要默认的 VZ NAT 网络（暂不支持 `OORT_NET=gvproxy`）。
 
 ### 示例
 

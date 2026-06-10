@@ -4,6 +4,14 @@ All notable changes to Oort. Dates are YYYY-MM-DD.
 
 ## Unreleased
 
+- **Sudo-free networking — `oort net install`.** A one-time-installed root
+  LaunchDaemon (the privileged-helper pattern OrbStack uses) watches
+  `~/.oort/net-request` and applies exactly two strictly-validated operations:
+  the 172.17/16 container route and `/etc/resolver/oort.local`. After install,
+  `oort start` refreshes the route automatically on every boot and
+  `oort domains`/`oort route` never ask for sudo again. Requests are validated
+  against fixed patterns (gateway must be 192.168.x.x, port 1024–65535,
+  injection-tested); all privileged writes go to fixed root-owned paths.
 - **`oort` docker context — the stock docker CLI just works.** `oort start`
   registers/refreshes a `oort` context and auto-selects it when the current
   context is `default` or its engine is dead (e.g. desktop-linux with Docker

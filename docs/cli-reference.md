@@ -23,7 +23,8 @@ lifecycle / exec / passthrough conveniences.
 | `oort logs` | Tail the guest console log |
 | `oort build-image` | (Re)build the boot disk + cloud-init seed + cross-compile the agent |
 | `oort reset` | Restore the disk from the golden snapshot |
-| `oort route enable\|disable` | Reach containers by their docker0 IP from macOS (sudo) |
+| `oort net install\|uninstall\|status` | One-time root helper (sudo once): after it, routes and `*.oort.local` apply automatically — no sudo ever again |
+| `oort route enable\|disable` | Reach containers by their docker0 IP from macOS (sudo-free with the net helper) |
 | `oort domains enable\|route\|disable` | `*.oort.local` names for containers/machines/compose services (sudo, see below) |
 | `oort k8s enable\|disable` | Run Kubernetes (k3s) in the guest |
 | `oort machine ...` | Manage named Linux machines (see below) |
@@ -83,8 +84,12 @@ docker run -d --name web nginx
 curl http://web.oort.local            # no published port required
 ```
 
-The route follows the guest IP, which can change across VM restarts —
-`oort start` prints a reminder and `oort domains route` refreshes it (sudo).
+The route follows the guest IP, which can change across VM restarts. With the
+**net helper** installed (`oort net install`, one sudo, ever), `oort start`
+refreshes it automatically; without it, `oort start` prints a reminder and
+`oort domains route` refreshes it (sudo). The helper is a tiny root LaunchDaemon
+that watches `~/.oort/net-request` and applies exactly two validated operations
+(the 172.17/16 route + the resolver file) — see `tools/oort-nethelper.sh`.
 `oort domains` alone shows status; `disable` removes the resolver file + route.
 Note: requires the default VZ NAT networking (not `OORT_NET=gvproxy`).
 
