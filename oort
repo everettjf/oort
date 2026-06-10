@@ -261,6 +261,12 @@ cmd_start() {
           echo "(*.oort.local: container route missing — run 'oort domains route')"
         fi
       fi
+      # Re-stage the HTTPS CA after a disk reset/rebuild wiped the guest copy
+      # (the durable CA lives on the Mac in ~/.oort/https). No-op when staged.
+      if [ -f "$HTTPS_DIR/ca.pem" ] && ! _https_up; then
+        echo "(https: re-staging the CA into the rebuilt guest…)"
+        _https_stage
+      fi
       echo; cmd_env; return 0
     fi
     printf "."; sleep 0.5
@@ -707,6 +713,21 @@ cmd_machine() {
 # terminates TLS for container-IP:443 (iptables REDIRECT → :8443), minting a
 # per-name leaf on the fly, and forwards plain HTTP to the container's :80.
 HTTPS_DIR="$STATE/https"
+
+# Ship the CA into the guest and restart the agent so the terminator picks it
+# up. Used by `https enable` and by `oort start` (a disk reset/rebuild wipes
+# the guest copy; the Mac-side CA in $HTTPS_DIR is the durable one).
+_https_stage() {
+  local certb64 keyb64
+  certb64=$(base64 < "$HTTPS_DIR/ca.pem" | tr -d '\n')
+  keyb64=$(base64 < "$HTTPS_DIR/ca.key" | tr -d '\n')
+  cmd_exec "mkdir -p /etc/oort/https && echo $certb64 | base64 -d > /etc/oort/https/ca.pem && echo $keyb64 | base64 -d > /etc/oort/https/ca.key && chmod 600 /etc/oort/https/ca.key && systemctl restart oort-guest" >/dev/null 2>&1 || true
+}
+
+_https_up() {
+  cmd_exec 'ss -tln 2>/dev/null | grep -q 8443 && echo UP' 2>/dev/null | grep -q UP
+}
+
 cmd_https() {
   case "${1:-status}" in
     enable)
@@ -723,13 +744,10 @@ cmd_https() {
       sudo security add-trusted-cert -d -r trustRoot \
         -k /Library/Keychains/System.keychain "$HTTPS_DIR/ca.pem"
       echo "staging the CA into the guest + restarting the agent…"
-      local certb64 keyb64
-      certb64=$(base64 < "$HTTPS_DIR/ca.pem" | tr -d '\n')
-      keyb64=$(base64 < "$HTTPS_DIR/ca.key" | tr -d '\n')
-      cmd_exec "mkdir -p /etc/oort/https && echo $certb64 | base64 -d > /etc/oort/https/ca.pem && echo $keyb64 | base64 -d > /etc/oort/https/ca.key && chmod 600 /etc/oort/https/ca.key && systemctl restart oort-guest && echo staged" >/dev/null 2>&1 || true
+      _https_stage
       # the restart drops the connection serving the reply — verify instead
       sleep 1
-      if cmd_exec 'ss -tln 2>/dev/null | grep -q 8443 && echo UP' | grep -q UP; then
+      if _https_up; then
         echo "https enabled — try:  docker run -d --name web nginx && open https://web.oort.local"
         [ -f "$DOMAINS_MARKER" ] || echo "(names need 'oort domains enable' too)"
       else
@@ -744,8 +762,7 @@ cmd_https() {
       echo "https disabled"
       ;;
     *)
-      if [ -f "$HTTPS_DIR/ca.pem" ] && vm_running \
-         && cmd_exec 'ss -tln 2>/dev/null | grep -q 8443 && echo UP' 2>/dev/null | grep -q UP; then
+      if [ -f "$HTTPS_DIR/ca.pem" ] && vm_running && _https_up; then
         echo "https: enabled (terminator on guest :8443, CA $HTTPS_DIR/ca.pem)"
       else
         echo "https: disabled (use 'oort https enable')"
