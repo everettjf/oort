@@ -107,16 +107,29 @@ Ordered roughly by value. These are larger, multi-step efforts.
   attaches the guest NIC to gvproxy via VZ's `VZFileHandleNetworkDeviceAttachment`, so
   guest traffic flows through macOS's stack — following the Mac's routes/VPN and DNS.
   Verified at parity with VZ NAT (e2e 18/22). Remaining: per-IP reachability from the
-  host (gvproxy's forwarding API) and `*.oort.local` domains; promote from opt-in once
-  proven against a live VPN.
+  host (gvproxy's forwarding API); promote from opt-in once proven against a live VPN.
+- ✅ **`*.oort.local` domains (shipped).** OrbStack's beloved `*.orb.local`, for oort:
+  the engine runs a tiny DNS responder on `127.0.0.1:5354` answering for containers
+  (`web.oort.local`), machines (`dev.oort.local`), and compose services
+  (`api.myproj.oort.local`) straight from the live Docker state. `oort domains enable`
+  (sudo, one-time) writes a domain-scoped `/etc/resolver/oort.local` and adds the
+  container route — then **any** container port is reachable by name, no `-p` publishing.
+  VZ NAT mode; the route follows the guest IP (`oort domains route` refreshes it).
 
 ### Resource efficiency
-- **Active memory ballooning** — grow/reclaim guest memory on demand (balloon device is attached).
+- ✅ **Active memory ballooning (shipped).** The engine periodically reads the guest's
+  real usage over the vsock agent and sets the balloon target to `used + headroom`
+  (deflate fast on load, reclaim slowly when idle) — so the VM's host footprint tracks
+  what the guest actually needs, OrbStack-style. Default on; `--no-dynamic-memory` opts out.
 - **zram** compressed swap (depends on the custom kernel having the module).
 
 ### Features
-- **Kubernetes** — k3s in the guest + a projected kube API + kubeconfig (the most self-contained next step).
-- **Multiple Linux machines** — named, multi-distro environments (OrbStack's "machines").
+- ✅ **Kubernetes (shipped).** `oort k8s enable` installs k3s in the guest (one-time),
+  projects its API server onto the Mac's `localhost:6443` (static tcp-forward) and
+  writes a kubeconfig to `~/.oort/kube/config` — then the stock `kubectl` just works.
+- ✅ **Multiple Linux machines (shipped).** `oort machine create/list/shell/exec/delete` —
+  named, multi-distro environments on the shared kernel (OrbStack's "machines"), plus
+  the snapshot/restore/fork time-travel OrbStack doesn't have (see Beyond OrbStack).
 - ✅ **GUI (shipped, v0.3.6)** — a complete native SwiftUI app (`oort gui`): dashboard,
   containers (+ logs), images, volumes, machines (snapshot/restore/fork/shell), settings,
   plus a menu-bar item. Talks to the engine via the Docker socket + the `oort` CLI.

@@ -65,6 +65,7 @@ $ oort exec 'uname -a'             # run a command inside the guest
 | 📁 **File sharing** | Your Mac home is mirrored into the guest at the same path, so `docker -v $PWD:/app` just works | ✅ |
 | 🧬 **Rosetta x86** | `linux/amd64` images run via Rosetta — far faster than QEMU | ✅ |
 | 🔌 **Port forwarding** | Container-published ports appear automatically on macOS `localhost` (event-driven) | ✅ |
+| 🪪 **`*.oort.local` domains** | `curl http://web.oort.local` reaches container "web" by name — any port, no `-p` (`oort domains enable`) | ✅ |
 | 🧭 **Follows Mac DNS** | Guest/containers use the Mac's DNS resolvers — internal/VPN domains resolve | ✅ |
 | 🛰️ **`oort` CLI** | Lifecycle, `oort exec`, docker passthrough, `oort autostart` at login | ✅ |
 | 🌱 **Machine time-travel** | `snapshot` / `restore` / **`fork`** a whole Linux machine (git-for-environments — *OrbStack can't*) | ✅ |
@@ -181,7 +182,9 @@ oort/
 - **VPN traffic**: shipped via the opt-in gvproxy netstack (`OORT_NET=gvproxy`); DNS already follows the Mac.
 - **zram**: the stock Ubuntu cloud kernel ships without the `zram` module, so that service
   no-ops. OrbStack builds a custom kernel with it baked in — that's a Stage 5 item.
-- **Dynamic memory**: the VirtIO balloon device is attached, but active ballooning isn't wired yet.
+- **`*.oort.local` reachability**: the names resolve via the engine's built-in DNS, but reaching
+  the IPs needs the container route (`oort domains enable`, sudo) — and the route follows the
+  guest IP, so a VM restart may need `oort domains route` (oort start reminds you). VZ NAT only.
 - **Single VM**: one shared-kernel VM (like WSL2 / OrbStack); multi-"machine" support is future.
 - Coexisting with Docker Desktop: mind `DOCKER_HOST` / `docker context` (see the [FAQ](./docs/faq.md)).
 
