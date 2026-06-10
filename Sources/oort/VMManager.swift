@@ -27,20 +27,95 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
         configuredMemory = configuration.memorySize
         Log.info("config: cpus=\(configuration.cpuCount) memory=\(configuration.memorySize / (1024*1024))MiB")
 
+        // Surface exactly which device blocks suspend/resume (M8) — VZ's restore
+        // errors are opaque ("invalid argument"), but this validation names it.
+        if #available(macOS 14, *), cfg.restoreState != nil {
+            do { try configuration.validateSaveRestoreSupport() }
+            catch { Log.warn("suspend/resume unsupported by this config: \(error.localizedDescription)") }
+        }
+
         vmQueue.sync {
             self.vm = VZVirtualMachine(configuration: configuration, queue: self.vmQueue)
             self.vm.delegate = self
         }
 
+        // Instant start (M8): if a suspended-state file exists, restore the whole
+        // VM (RAM + devices) instead of cold-booting — sub-second, and running
+        // containers come back exactly where they were. The state is one-shot:
+        // delete it the moment the restore succeeds, because resumed RAM diverges
+        // from it immediately (restoring it twice would corrupt the guest fs).
+        if #available(macOS 14, *),
+           let stateURL = cfg.restoreState, FileManager.default.fileExists(atPath: stateURL.path) {
+            vmQueue.async {
+                self.vm.restoreMachineStateFrom(url: stateURL) { err in
+                    if let err {
+                        // Unsupported device / config drift / stale file — cold-boot.
+                        Log.warn("restore failed (\(err.localizedDescription)); cold-booting")
+                        try? FileManager.default.removeItem(at: stateURL)
+                        self.coldStart()
+                        return
+                    }
+                    try? FileManager.default.removeItem(at: stateURL)
+                    self.vm.resume { result in
+                        switch result {
+                        case .failure(let err):
+                            Log.error("VM failed to resume: \(err.localizedDescription)")
+                            exit(1)
+                        case .success:
+                            Log.info("VM resumed from suspended state")
+                            self.startProxy()
+                        }
+                    }
+                }
+            }
+            return
+        }
+        vmQueue.async { self.coldStart() }
+    }
+
+    /// Plain cold boot. Must run on `vmQueue`.
+    private func coldStart() {
+        vm.start { result in
+            switch result {
+            case .failure(let err):
+                Log.error("VM failed to start: \(err.localizedDescription)")
+                exit(1)
+            case .success:
+                Log.info("VM started")
+                self.startProxy()
+            }
+        }
+    }
+
+    /// Suspend (M8): pause the VM and save its whole state (RAM + devices) to
+    /// disk, then exit. The next `oort start` restores it in well under a second
+    /// — with every container still running. On any failure the VM is resumed
+    /// and keeps running, so a suspend can never lose a working VM.
+    func requestSuspend(to stateURL: URL) {
+        guard #available(macOS 14, *) else {
+            Log.warn("suspend needs macOS 14+ — ignoring")
+            return
+        }
         vmQueue.async {
-            self.vm.start { result in
-                switch result {
-                case .failure(let err):
-                    Log.error("VM failed to start: \(err.localizedDescription)")
-                    exit(1)
-                case .success:
-                    Log.info("VM started")
-                    self.startProxy()
+            guard let vm = self.vm, vm.canPause else {
+                Log.warn("suspend: VM not pausable right now — ignoring")
+                return
+            }
+            vm.pause { result in
+                if case .failure(let err) = result {
+                    Log.warn("suspend: pause failed (\(err.localizedDescription)) — VM keeps running")
+                    return
+                }
+                try? FileManager.default.removeItem(at: stateURL)
+                vm.saveMachineStateTo(url: stateURL) { err in
+                    if let err {
+                        Log.warn("suspend: save failed (\(err.localizedDescription)) — resuming")
+                        try? FileManager.default.removeItem(at: stateURL)
+                        vm.resume { _ in }
+                        return
+                    }
+                    Log.info("VM state saved to \(stateURL.path) — exiting (next start resumes instantly)")
+                    exit(0)
                 }
             }
         }

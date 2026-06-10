@@ -23,6 +23,23 @@ do {
     sigint.resume()
     signal(SIGINT, SIG_IGN) // hand control to the dispatch source
 
+    // SIGUSR1: suspend the whole VM to the --state file and exit (M8); the
+    // next `oort start` resumes it instantly, containers still running.
+    // Declared in this scope (like sigint above) so the dispatch source stays
+    // alive across dispatchMain().
+    var sigusr1: DispatchSourceSignal?
+    if let stateURL = cfg.restoreState {
+        let src = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+        src.setEventHandler {
+            Log.info("SIGUSR1 — suspending VM to \(stateURL.path)…")
+            manager.requestSuspend(to: stateURL)
+        }
+        src.resume()
+        signal(SIGUSR1, SIG_IGN)
+        sigusr1 = src
+    }
+    _ = sigusr1
+
     try manager.startAndProject()
     dispatchMain()
 } catch CLIError.help {

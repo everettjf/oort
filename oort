@@ -5,6 +5,7 @@
 # commands in the guest, and point the Docker CLI at the projected socket.
 #
 #   oort start                 boot the VM (Docker + file sharing + Rosetta + ports)
+#   oort suspend               freeze the VM to disk; next start resumes instantly
 #   oort stop                  shut the VM down
 #   oort status                show VM / Docker status
 #   oort doctor [--heal]       probe VM/dockerd/agent health (host-side); --heal recovers
@@ -34,6 +35,7 @@ DOCKER_SOCK="$STATE/docker.sock"
 AGENT_SOCK="$STATE/agent.sock"
 CONSOLE_LOG="$STATE/console.log"
 PIDFILE="$STATE/vm.pid"
+VMSTATE="$STATE/vmstate.bin"
 DISK="${OORT_DISK:-$HERE/images/disk.img}"
 SEED="${OORT_SEED:-$HERE/images/seed.img}"
 GOLDEN="${OORT_GOLDEN:-$HERE/images/disk-golden.img}"
@@ -126,6 +128,21 @@ cmd_start() {
   local extra=()
   [ -f "$K8S_MARKER" ] && extra+=(--tcp-forward 6443)   # project the k3s API
   extra+=(--dns-port "$DNS_PORT")   # *.oort.local resolver (OORT_DNS_PORT; 0 disables)
+  # Suspend/resume (M8): always hand the engine the state path — it restores
+  # from it when present (sub-second start, containers intact) and SIGUSR1
+  # (oort suspend) saves back to it. Stale-state guard: the file is only valid
+  # for the exact disk it was saved against; discard it if the disk is newer
+  # (build-image/reset/another boot would corrupt the resumed fs).
+  local resumed=0
+  if [ -f "$VMSTATE" ]; then
+    if [ "$DISK" -nt "$VMSTATE" ]; then
+      echo "(discarding stale suspend state — disk image changed)"
+      rm -f "$VMSTATE"
+    else
+      resumed=1
+    fi
+  fi
+  extra+=(--state "$VMSTATE")
   # Direct-kernel boot (M2): if a kernel Image is staged, boot it straight via VZ's
   # VZLinuxBootLoader — skipping the EFI firmware + GRUB stage for a faster cold
   # start. Falls back to EFI automatically when the artifact is absent, or when
@@ -179,6 +196,14 @@ cmd_start() {
     # daemon can actually create containers, which races the first `docker run`.
     if curl -s --max-time 4 --unix-socket "$DOCKER_SOCK" http://localhost/version 2>/dev/null | grep -q '"ApiVersion"'; then
       echo " ready."
+      # After a resume the guest clock is frozen at suspend time — step it to
+      # now (TLS, apt, token expiry all break on a skewed clock). Best-effort:
+      # the engine may also have cold-booted if the state file was unusable.
+      if [ "$resumed" = 1 ]; then
+        curl -s --max-time 8 --unix-socket "$AGENT_SOCK" -X POST --data-binary \
+          "date -u -s @$(date -u +%s) >/dev/null 2>&1; hwclock --systohc 2>/dev/null; echo clocked" \
+          http://localhost/ >/dev/null 2>&1 || true
+      fi
       [ "${MOUNT_HOME:-0}" = 1 ] && mount_home
       if [ "${OORT_NET:-}" = gvproxy ]; then sync_dns_gvproxy; else sync_dns; fi
       # *.oort.local needs the container route, and the guest IP can change
@@ -197,6 +222,35 @@ cmd_start() {
 _kill_gvproxy() {
   [ -f "$GVPIDFILE" ] && kill "$(cat "$GVPIDFILE")" 2>/dev/null
   rm -f "$GVPIDFILE" "$GVNET_SOCK" "$GVNET_SOCK.vm" "$GVCTL_SOCK"
+}
+
+# Suspend (M8): freeze the whole VM (RAM + devices) to ~/.oort/vmstate.bin and
+# exit. The next `oort start` resumes it in well under a second — running
+# containers, shells, port state all come back exactly where they were.
+# (OrbStack stops/cold-boots; it has nothing like this.)
+cmd_suspend() {
+  if ! vm_running; then echo "oort not running"; return 0; fi
+  local pid; pid="$(cat "$PIDFILE")"
+  printf "suspending (saving VM state)…"
+  kill -USR1 "$pid" 2>/dev/null || true
+  # The engine exits once the state is saved; a save failure leaves it running.
+  for _ in $(seq 1 120); do
+    kill -0 "$pid" 2>/dev/null || {
+      rm -f "$PIDFILE"; _kill_gvproxy
+      # The engine is gone — but only call it a suspend if the state actually
+      # landed (an engine without the SIGUSR1 handler dies on the signal).
+      if [ -s "$VMSTATE" ]; then
+        echo " done."
+        ls -lh "$VMSTATE" | awk '{print "  state: "$NF" ("$5") - next start resumes instantly"}'
+        return 0
+      fi
+      echo " engine exited WITHOUT saving state (old engine binary? see $STATE/vm.log)"
+      exit 1
+    }
+    sleep 0.5
+  done
+  echo " engine still running — suspend not supported here? (see $STATE/vm.log)"
+  exit 1
 }
 
 cmd_stop() {
@@ -218,7 +272,13 @@ cmd_stop() {
 }
 
 cmd_status() {
-  if vm_running; then echo "VM:     running (pid $(cat "$PIDFILE"))"; else echo "VM:     stopped"; fi
+  if vm_running; then
+    echo "VM:     running (pid $(cat "$PIDFILE"))"
+  elif [ -s "$VMSTATE" ]; then
+    echo "VM:     suspended ($(du -h "$VMSTATE" 2>/dev/null | cut -f1) state — 'oort start' resumes instantly)"
+  else
+    echo "VM:     stopped"
+  fi
   if curl -s --max-time 4 --unix-socket "$DOCKER_SOCK" http://localhost/_ping 2>/dev/null | grep -q OK; then
     local v; v="$(curl -s --unix-socket "$DOCKER_SOCK" http://localhost/version 2>/dev/null \
       | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["Version"],d["Os"]+"/"+d["Arch"])' 2>/dev/null)"
@@ -730,6 +790,7 @@ PLIST
 
 case "${1:-help}" in
   start)        shift; cmd_start "$@";;
+  suspend)      shift; cmd_suspend "$@";;
   stop)         shift; cmd_stop "$@";;
   restart)      shift; cmd_stop; cmd_start "$@";;
   status)       shift; cmd_status "$@";;

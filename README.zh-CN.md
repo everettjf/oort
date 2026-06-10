@@ -66,6 +66,7 @@ $ oort exec 'uname -a'             # 直接在客户机里执行命令
 | 🧭 **跟随 Mac DNS** | 客户机/容器用 Mac 的 DNS 解析器——内网/VPN 域名可解析 | ✅ |
 | 🛰️ **`oort` CLI** | 生命周期、`oort exec`、docker 透传、`oort autostart` 开机自启 | ✅ |
 | 🌱 **机器时间旅行** | `snapshot` / `restore` / **`fork`** 整台 Linux 机器（环境的 git——*OrbStack 做不到*） | ✅ |
+| ⚡ **瞬间恢复** | `oort suspend` 冻结整台 VM；下次 start **~1.2s 恢复、容器原地存活**（*OrbStack 只能冷启动*） | ✅ |
 | 🖥️ **原生 SwiftUI 应用** | 窗口化控制面板（仪表盘、容器、镜像、卷、机器、设置）+ 菜单栏 —— `oort gui` | ✅ |
 | 💾 **zram 压缩交换** | 已接入（需内核含 zram 模块，详见文档） | ⚠️ |
 

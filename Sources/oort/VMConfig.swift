@@ -16,7 +16,7 @@ enum VMConfig {
         vm.cpuCount = clampCPU(cfg.cpuCount)
         vm.memorySize = clampMemory(cfg.memoryBytes)
 
-        vm.platform = VZGenericPlatformConfiguration()
+        vm.platform = makePlatform(cfg)
         vm.bootLoader = try makeBootLoader(cfg.boot)
 
         var disks: [VZStorageDeviceConfiguration] = [try makeDisk(cfg.diskImage, readOnly: false)]
@@ -43,6 +43,25 @@ enum VMConfig {
 
         try vm.validate()
         return vm
+    }
+
+    // MARK: - Platform
+
+    /// A stable machine identifier, persisted next to the disk image. Without
+    /// this every process gets a fresh random identity — which is what made
+    /// restoring a suspended state fail with VZ's opaque "invalid argument"
+    /// (the saved state belongs to the *saving* machine's identity).
+    private static func makePlatform(_ cfg: Config) -> VZGenericPlatformConfiguration {
+        let platform = VZGenericPlatformConfiguration()
+        let idURL = cfg.diskImage.appendingPathExtension("machineid")
+        if let data = try? Data(contentsOf: idURL),
+           let id = VZGenericMachineIdentifier(dataRepresentation: data) {
+            platform.machineIdentifier = id
+        } else {
+            try? platform.machineIdentifier.dataRepresentation.write(to: idURL)
+            Log.info("created machine identifier at \(idURL.path)")
+        }
+        return platform
     }
 
     // MARK: - Boot

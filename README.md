@@ -69,6 +69,7 @@ $ oort exec 'uname -a'             # run a command inside the guest
 | 🧭 **Follows Mac DNS** | Guest/containers use the Mac's DNS resolvers — internal/VPN domains resolve | ✅ |
 | 🛰️ **`oort` CLI** | Lifecycle, `oort exec`, docker passthrough, `oort autostart` at login | ✅ |
 | 🌱 **Machine time-travel** | `snapshot` / `restore` / **`fork`** a whole Linux machine (git-for-environments — *OrbStack can't*) | ✅ |
+| ⚡ **Instant resume** | `oort suspend` freezes the VM; the next start resumes in **~1.2s with containers still running** (*OrbStack cold-boots*) | ✅ |
 | 🖥️ **Native SwiftUI app** | Windowed control panel (dashboard, containers, images, volumes, machines, settings) + menu bar — `oort gui` | ✅ |
 | 💾 **zram swap** | Wired up (needs a kernel with the zram module — see docs) | ⚠️ |
 

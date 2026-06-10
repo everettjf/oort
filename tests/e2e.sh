@@ -202,6 +202,25 @@ r=n; for _ in $(seq 1 15); do
 done
 check "$r" "y" "watchdog auto-recovers a wedged dockerd"
 
+echo "── M8 suspend/resume ─────────────────────────"
+# Freeze the VM mid-flight with a counting container, resume, and require BOTH
+# that the container kept its in-memory state (a cold boot would have left it
+# stopped — no restart policy) AND that the resume was actually fast.
+gdock rm -f e2esus >/dev/null 2>&1
+gdock run -d --name e2esus --platform linux/arm64 busybox:latest sh -c 'i=0; while :; do i=$((i+1)); echo $i > /c; sleep 1; done' >/dev/null 2>&1
+sleep 3
+pre=$(gdock exec e2esus cat /c 2>/dev/null | tr -dc 0-9)
+"$ORB" suspend >/dev/null 2>&1
+check "$([ -s "$HOME/.oort/vmstate.bin" ] && echo y || echo n)" "y" "suspend saved a state file"
+t0=$(date +%s)
+"$ORB" start >/dev/null 2>&1
+dt=$(( $(date +%s) - t0 ))
+sleep 2
+post=$(gdock exec e2esus cat /c 2>/dev/null | tr -dc 0-9)
+check "$([ -n "$pre" ] && [ -n "$post" ] && [ "$post" -gt "$pre" ] && echo y || echo n)" "y" "container survived suspend/resume with state (pre=$pre post=$post)"
+check "$([ "$dt" -le 3 ] && echo y || echo n)" "y" "resume is fast (${dt}s ≤ 3s)"
+gdock rm -f e2esus >/dev/null 2>&1
+
 echo "── restart on a mutated disk ─────────────────"
 # The top Phase-0 reliability bug: a clean cold boot works, but restarting after
 # the disk has been written (the create/destroy + k3s churn above) used to fail —

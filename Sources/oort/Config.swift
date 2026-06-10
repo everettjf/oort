@@ -49,6 +49,10 @@ struct Config {
     var seedImage: URL?
     /// If set, write the guest serial console to this file (headless debugging).
     var consoleLog: URL?
+    /// If set and the file exists, restore the whole VM from this suspended-state
+    /// file instead of cold-booting (M8); falls back to a cold boot on failure.
+    /// SIGUSR1 suspends the VM back to this path.
+    var restoreState: URL?
     /// If set, attach the guest NIC to this gvproxy vfkit unixgram socket (a
     /// user-space network stack on the host) instead of VZ NAT. The guest's
     /// traffic then flows through macOS's own stack — following VPN/DNS — and
@@ -100,6 +104,9 @@ struct Config {
           --no-dynamic-memory      Don't actively balloon idle guest memory back.
           --dns-port <n>           UDP port for the *.oort.local resolver on
                                    127.0.0.1 (default: 5354; 0 disables).
+          --state <path>           Suspend/resume state file: restore from it when
+                                   it exists (else cold-boot); SIGUSR1 suspends
+                                   the VM back to it and exits.
 
         MISC:
           --no-console             Don't attach the guest serial console to stdio
@@ -129,6 +136,7 @@ struct Config {
         var tcpForwards: [Int] = []
         var consoleLog: URL?
         var nvram: URL?
+        var stateFile: URL?
         var netVfkit: String?
         var kernel: URL?
         var initrd: URL?
@@ -157,6 +165,7 @@ struct Config {
             case "--tcp-forward": if let p = Int(try need(arg)) { tcpForwards.append(p) }
             case "--console-log": consoleLog = URL(fileURLWithPath: try need(arg))
             case "--nvram":      nvram = URL(fileURLWithPath: try need(arg))
+            case "--state":      stateFile = URL(fileURLWithPath: try need(arg))
             case "--net-vfkit":  netVfkit = try need(arg)
             case "--kernel":     kernel = URL(fileURLWithPath: try need(arg))
             case "--initrd":     initrd = URL(fileURLWithPath: try need(arg))
@@ -197,6 +206,7 @@ struct Config {
             serialConsole: console,
             seedImage: seed,
             consoleLog: consoleLog,
+            restoreState: stateFile,
             netVfkitSocket: netVfkit
         )
     }

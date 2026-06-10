@@ -66,6 +66,13 @@ structural advantage (open-source, scriptable, MIT). Thesis:
   Verified e2e (a full agent workflow: create→exec→snapshot→break→restore→fork with
   branch isolation→destroy). See [`mcp/`](../mcp/README.md). *OrbStack has nothing
   like this.*
+- ✅ **Instant resume (shipped).** `oort suspend` pauses the VM and saves its whole
+  state (RAM + devices) via VZ's save/restore; the next `oort start` resumes in
+  **~1.2s** — running containers, shells and sockets come back exactly where they
+  were, and the guest clock is re-stepped. State is one-shot and discarded if the
+  disk image changes underneath it. (Needed a persisted `VZGenericMachineIdentifier`
+  — a fresh random identity made restore fail with VZ's opaque "invalid argument".)
+  *OrbStack cold-boots; it has nothing like this.*
 - ✅ **`oort up` (env-as-code, shipped).** A declarative `oort.yaml` (or `.json`)
   describes machines + one-time `setup` commands; `oort up` reproduces them and
   `oort down` tears them down. Dependency-free parser (stdlib only). Idempotent

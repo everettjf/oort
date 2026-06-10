@@ -4,6 +4,15 @@ All notable changes to Oort. Dates are YYYY-MM-DD.
 
 ## Unreleased
 
+- **Instant resume — `oort suspend`.** Freezes the whole VM (RAM + devices) to
+  `~/.oort/vmstate.bin` via VZ save/restore (macOS 14+); the next `oort start`
+  resumes in **~1.2s** (cold boot: ~4.4s; OrbStack: ~1–2s cold) with running
+  containers, shells and sockets intact, and re-steps the guest clock. The state
+  is one-shot (deleted on restore) and auto-discarded when the disk image changes
+  underneath it; any restore failure falls back to a cold boot. Required persisting
+  the `VZGenericMachineIdentifier` next to the disk — a fresh random identity made
+  restore fail with VZ's opaque "invalid argument". `oort status` now shows
+  "suspended"; e2e covers state-survival across suspend/resume and resume speed.
 - **`*.oort.local` domains** — OrbStack's beloved `*.orb.local`, for oort. The engine
   now runs a tiny DNS responder on `127.0.0.1:5354` (UDP; `--dns-port`, `0` disables)
   answering for containers (`web.oort.local`), machines (`dev.oort.local`), and compose
