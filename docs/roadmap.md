@@ -115,6 +115,11 @@ Ordered roughly by value. These are larger, multi-step efforts.
   guest traffic flows through macOS's stack — following the Mac's routes/VPN and DNS.
   Verified at parity with VZ NAT (e2e 18/22). Remaining: per-IP reachability from the
   host (gvproxy's forwarding API); promote from opt-in once proven against a live VPN.
+  **Deliberately deferred** until a live-VPN test rig exists — the whole feature is
+  VPN behaviour, and shipping unverifiable network plumbing is against the project's
+  verified-on-real-hardware bar. (IPv6 falls in the same bucket: the guest disables
+  it on purpose — VZ NAT's resolver hands out IPv6-only mirror addresses that stall
+  provisioning — and a proper fix is gvproxy-mode work anyway.)
 - ✅ **`*.oort.local` domains (shipped).** OrbStack's beloved `*.orb.local`, for oort:
   the engine runs a tiny DNS responder on `127.0.0.1:5354` answering for containers
   (`web.oort.local`), machines (`dev.oort.local`), and compose services

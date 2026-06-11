@@ -286,8 +286,16 @@ check "$([ -s "$HOME/.oort/vmstate.bin" ] && echo y || echo n)" "y" "suspend sav
 t0=$(date +%s)
 "$ORB" start >/dev/null 2>&1
 dt=$(( $(date +%s) - t0 ))
-sleep 2
-post=$(gdock exec e2esus cat /c 2>/dev/null | tr -dc 0-9)
+# start may restart the agent right after resume (e.g. https CA re-staging
+# when an earlier section removed the guest copy) — settle, then poll until
+# the counter has visibly advanced past its pre-suspend value (1 tick/s).
+agent_settle
+post=""
+for _ in $(seq 1 12); do
+  post=$(gdock exec e2esus cat /c 2>/dev/null | tr -dc 0-9)
+  [ -n "$post" ] && [ -n "$pre" ] && [ "$post" -gt "$pre" ] && break
+  sleep 1
+done
 check "$([ -n "$pre" ] && [ -n "$post" ] && [ "$post" -gt "$pre" ] && echo y || echo n)" "y" "container survived suspend/resume with state (pre=$pre post=$post)"
 check "$([ "$dt" -le 3 ] && echo y || echo n)" "y" "resume is fast (${dt}s ≤ 3s)"
 gdock rm -f e2esus >/dev/null 2>&1
