@@ -267,8 +267,9 @@
         <a class="btn btn-ghost" href="https://github.com/everettjf/oort" target="_blank" rel="noopener"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.2.8-.5v-1.7c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.3 1 .1-.7.4-1.3.7-1.5-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17.3 4.7 18.3 5 18.3 5c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.6.8.5 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>Star on GitHub</a>
       </div>
       <div class="meta-row reveal" data-d="4">
-        <span><b>~8.8&nbsp;s</b> cold start (golden)</span>
+        <span><b>~1.2&nbsp;s</b> resume · ~4.5&nbsp;s cold</span>
         <span><b>stock</b> docker CLI</span>
+        <span><b>brew</b> install</span>
         <span><b>MIT</b> licensed</span>
       </div>
     </div>
@@ -296,15 +297,18 @@
       <p>oort studies <em>why</em> OrbStack is fast and light, then reimplements the core mechanisms by hand. One command to start; the stock <code style="font-family:var(--mono);color:var(--cyan)">docker</code> CLI just works.</p>
     </div>
     <div class="grid">
-      <div class="card reveal"><span class="ic">🐳</span><h3>Docker over vsock <span class="ok">✓</span></h3><p>VZ boots a Linux VM; dockerd is projected onto a macOS Unix socket through virtio-vsock.</p></div>
-      <div class="card reveal" data-d="1"><span class="ic">🌐</span><h3>Networking <span class="ok">✓</span></h3><p>dockerd manages iptables NAT — <code style="font-family:var(--mono)">docker build</code> and runtime egress work; guest follows the Mac's DNS.</p></div>
-      <div class="card reveal" data-d="2"><span class="ic">📁</span><h3>VirtioFS sharing <span class="ok">✓</span></h3><p>Bind-mount Mac directories straight into containers over a VirtioFS share.</p></div>
-      <div class="card reveal"><span class="ic">⚡</span><h3>Rosetta x86-64 <span class="ok">✓</span></h3><p><code style="font-family:var(--mono)">--platform linux/amd64</code> images run via Apple's Rosetta translation.</p></div>
-      <div class="card reveal" data-d="1"><span class="ic">🔌</span><h3>Port mapping <span class="ok">✓</span></h3><p>Published container ports surface on <code style="font-family:var(--mono)">localhost</code> automatically.</p></div>
-      <div class="card reveal" data-d="2"><span class="ic">🪶</span><h3>zram + ballooning <span class="ok">✓</span></h3><p>Kernel-tier memory efficiency: zram swap plus active balloon that returns idle RAM to macOS.</p></div>
-      <div class="card reveal"><span class="ic">☸️</span><h3>Kubernetes (k3s) <span class="ok">✓</span></h3><p>One command runs k3s in the guest and projects the kube API onto localhost:6443.</p></div>
-      <div class="card reveal" data-d="1"><span class="ic">📦</span><h3>Linux machines <span class="ok">✓</span></h3><p>Named, multi-distro environments you shell into — Ubuntu, Alpine, more.</p></div>
-      <div class="card reveal" data-d="2"><span class="ic">🖥️</span><h3>Menu-bar GUI <span class="ok">✓</span></h3><p>A native SwiftUI menu-bar app shows status and starts/stops the engine.</p></div>
+      <div class="card reveal"><span class="ic">⚡</span><h3>Instant resume <span class="ok">✓</span></h3><p><code style="font-family:var(--mono)">oort suspend</code> freezes the whole VM; the next start resumes in <b>~1.2&nbsp;s with containers still running</b>. OrbStack cold-boots.</p></div>
+      <div class="card reveal" data-d="1"><span class="ic">🪪</span><h3>Domains + trusted HTTPS <span class="ok">✓</span></h3><p><code style="font-family:var(--mono)">https://web.oort.local</code> just works — any container, any port, per-name certs from a local CA. No <code style="font-family:var(--mono)">-p</code> publishing.</p></div>
+      <div class="card reveal" data-d="2"><span class="ic">📂</span><h3>~/Oort in Finder <span class="ok">✓</span></h3><p>The guest's and every machine's live filesystem, browsable and read-write from macOS — no sudo, no kexts.</p></div>
+      <div class="card reveal"><span class="ic">🪄</span><h3>The <code style="font-family:var(--mono)">mac</code> command <span class="ok">✓</span></h3><p>Run Mac commands from any Linux shell: <code style="font-family:var(--mono)">mac open https://…</code>, <code style="font-family:var(--mono)">mac pbpaste</code>. Output and exit codes round-trip.</p></div>
+      <div class="card reveal" data-d="1"><span class="ic">🌱</span><h3>Machine time-travel <span class="ok">✓</span></h3><p><code style="font-family:var(--mono)">snapshot / restore / fork</code> a whole Linux machine — git for dev environments. <b>OrbStack can't.</b></p></div>
+      <div class="card reveal" data-d="2"><span class="ic">🤖</span><h3>AI-agent sandboxes <span class="ok">✓</span></h3><p><code style="font-family:var(--mono)">oort mcp</code> gives coding agents disposable machines with snapshot-on-risk and fork-to-explore — built on time-travel.</p></div>
+      <div class="card reveal"><span class="ic">🐳</span><h3>Docker over vsock <span class="ok">✓</span></h3><p>dockerd projected onto a macOS socket; the stock CLI works via an auto-selected <code style="font-family:var(--mono)">oort</code> docker context.</p></div>
+      <div class="card reveal" data-d="1"><span class="ic">🔗</span><h3>ssh + VS Code <span class="ok">✓</span></h3><p><code style="font-family:var(--mono)">ssh oort</code> on a stable localhost port; pick host "oort" in VS Code Remote-SSH and develop inside.</p></div>
+      <div class="card reveal" data-d="2"><span class="ic">♻️</span><h3>Disk gives space back <span class="ok">✓</span></h3><p>Guest TRIM punches APFS holes on the Mac — freed space returns automatically (daily) or on demand.</p></div>
+      <div class="card reveal"><span class="ic">⚙️</span><h3>Rosetta x86-64 <span class="ok">✓</span></h3><p><code style="font-family:var(--mono)">--platform linux/amd64</code> images run via Apple's Rosetta translation — far faster than QEMU.</p></div>
+      <div class="card reveal" data-d="1"><span class="ic">☸️</span><h3>Kubernetes (k3s) <span class="ok">✓</span></h3><p>One command runs k3s in the guest and projects the kube API onto localhost:6443.</p></div>
+      <div class="card reveal" data-d="2"><span class="ic">🪶</span><h3>zram + ballooning <span class="ok">✓</span></h3><p>Kernel-tier memory efficiency: zram swap plus an active balloon that returns idle RAM to macOS.</p></div>
     </div>
   </div>
 </section>
@@ -322,16 +326,14 @@
       <div class="step reveal">
         <div class="step-n">1</div>
         <div class="step-body">
-          <h3>Clone &amp; build the golden image</h3>
-          <p>One-time: build and provision the disk, then snapshot a ready-to-boot "golden" image.</p>
+          <h3>Install (brew) — or clone the repo</h3>
+          <p>The app is self-contained: first start downloads the Ubuntu image and builds the golden disk under <code style="font-family:var(--mono)">~/.oort</code>, automatically.</p>
           <div class="term">
-            <div class="term-bar"><i></i><i></i><i></i><span>zsh — ~/dev</span><span class="copy" data-clip="git clone https://github.com/everettjf/oort
-cd oort
-./oort build-image">copy</span></div>
-<pre><span class="p">$</span> <span class="k">git</span> clone https://github.com/everettjf/oort
-<span class="p">$</span> <span class="k">cd</span> oort
-<span class="p">$</span> ./<span class="k">oort</span> build-image       <span class="c"># provisions once, snapshots golden</span>
-<span class="o">done. 'oort start' is now instant; 'oort reset' restores this snapshot.</span></pre>
+            <div class="term-bar"><i></i><i></i><i></i><span>zsh</span><span class="copy" data-clip="brew install qemu
+brew install --cask everettjf/tap/oort">copy</span></div>
+<pre><span class="p">$</span> <span class="k">brew</span> install qemu                          <span class="c"># one external tool (image conversion)</span>
+<span class="p">$</span> <span class="k">brew</span> install --cask everettjf/tap/oort
+<span class="c"># hackers: git clone https://github.com/everettjf/oort && ./oort build-image</span></pre>
           </div>
         </div>
       </div>
@@ -428,8 +430,8 @@ kubectl get nodes">copy</span></div>
   <div class="wrap">
     <div class="callout reveal">
       <h3>◇ Honest status</h3>
-      <p>A cold boot from the golden image is <b>fast and reliable</b> (~8.8&nbsp;s), and Docker, VirtioFS, Rosetta, machines, zram, ballooning and DNS-follow are verified end-to-end. oort is a study project, not a Docker Desktop replacement for production.</p>
-      <p>Known residual: <b>restarting a heavily-mutated disk</b> can occasionally leave the guest services down — <code>oort reset</code> restores the golden image as a reliable recovery. The remaining moat (OrbStack-class cold start and native-speed bind mounts) is the deliberately-deferred hard work. See the <a href="https://github.com/everettjf/oort/blob/main/docs/plan.md" target="_blank" rel="noopener" style="color:var(--cyan)">plan</a> for the full roadmap.</p>
+      <p>Everything above is <b>verified on real hardware by a 32-test end-to-end suite</b> — boot, Docker, domains + HTTPS, ssh, Finder fs, the <code style="font-family:var(--mono)">mac</code> command, suspend/resume with surviving containers, time-travel, MCP sandboxes, and self-healing watchdogs for wedged daemons. Cold start ~4.5&nbsp;s (stock kernel) / ~2.8&nbsp;s (self-built); resume ~1.2&nbsp;s.</p>
+      <p>Known residual: bind-mount <em>metadata</em> speed (VirtioFS is 8–35× slower per-file than the guest disk; real <code style="font-family:var(--mono)">npm install</code> is only ~1.2× — <code style="font-family:var(--mono)">oort fastvol</code> covers the hot paths). Matching OrbStack's general virtiofs speed needs a custom VMM — deliberately deferred. See the <a href="https://github.com/everettjf/oort/blob/main/docs/roadmap.md" target="_blank" rel="noopener" style="color:var(--cyan)">roadmap</a>.</p>
     </div>
   </div>
 </section>
@@ -440,7 +442,7 @@ kubectl get nodes">copy</span></div>
     <div class="band reveal">
       <div class="kicker" style="justify-content:center">Open source · MIT</div>
       <h2>Boot Linux. Run Docker. Stay light.</h2>
-      <p>Clone the repo, build the golden image, and you're one <code style="font-family:var(--mono);color:var(--cyan)">oort start</code> away.</p>
+      <p><code style="font-family:var(--mono);color:var(--cyan)">brew install --cask everettjf/tap/oort</code> — you're one <code style="font-family:var(--mono);color:var(--cyan)">oort start</code> away.</p>
       <div class="cta-row">
         <a class="btn btn-primary" href="https://github.com/everettjf/oort" target="_blank" rel="noopener">Open on GitHub →</a>
         <a class="btn btn-ghost" href="https://github.com/everettjf/oort/blob/main/docs/quickstart.md" target="_blank" rel="noopener">Read the docs</a>
