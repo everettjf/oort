@@ -2,7 +2,12 @@
 
 All notable changes to Oort. Dates are YYYY-MM-DD.
 
-## Unreleased
+## v0.3.0 — 2026-06-10
+
+The "lives on your Mac" release: the guest's filesystem in Finder, Mac
+commands from Linux shells, ssh/VS Code into the guest, disk space that
+returns itself — plus two root-cause fixes (the suspend/resume agent
+starvation and the golden-image kernel/module mismatch).
 
 - **`oort ssh` + VS Code Remote-SSH.** The guest's sshd is projected onto a
   stable `localhost:2222` (new `--tcp-forward host:guest` syntax), surviving
