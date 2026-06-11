@@ -28,13 +28,22 @@ standalone, notarized app.
   xcrun stapler staple build/oort-<v>.dmg
   ```
 
-## What's deliverable today (honest)
+## What's deliverable today
 
-The `.app` is a **native front-end that drives a local oort install** — its
-`OORT_HOME` is baked to the repo it was built from, so it finds the `oort` CLI +
-engine even when dragged to `/Applications`. You still need that repo present and a
-golden image built (`oort build-image`). So today's `.dmg` distributes the GUI, not
-a one-click, self-contained product.
+The `.app` is **self-contained** (since v0.3.1): `Contents/Resources/oort-home`
+carries the CLI, a prebuilt + pre-entitled engine, the prebuilt guest agent,
+cloud-init, and (unless built with `OORT_APP_SLIM=1`) a pre-staged Docker
+tarball for deterministic provisioning. All mutable data lives under `~/.oort`
+(`images/`, `share/`) — nothing ever writes into the bundle, which would break
+its signature.
+
+First `oort start` (or GUI launch) bootstraps everything: it downloads the
+Ubuntu 24.04 arm64 cloud image (~600MB, once) and builds the golden disk. The
+one external dependency is `qemu-img` (`brew install qemu`) for the qcow2→raw
+conversion — the CLI prints that hint when it's missing.
+
+A repo checkout works exactly as before (images under `./images`, agent built
+from source); bundle mode is detected via the `.bundled` marker.
 
 ### Install the GUI via Homebrew
 

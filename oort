@@ -42,10 +42,36 @@ AGENT_SOCK="$STATE/agent.sock"
 CONSOLE_LOG="$STATE/console.log"
 PIDFILE="$STATE/vm.pid"
 VMSTATE="$STATE/vmstate.bin"
-DISK="${OORT_DISK:-$HERE/images/disk.img}"
-SEED="${OORT_SEED:-$HERE/images/seed.img}"
-GOLDEN="${OORT_GOLDEN:-$HERE/images/disk-golden.img}"
-SHARE="${OORT_SHARE:-$HERE/share}"
+# Bundled mode (M15): when this CLI ships inside oort.app (marker .bundled),
+# everything mutable lives under ~/.oort — images in $STATE/images, the share
+# in $STATE/share (the app bundle must NEVER be written to: it would break its
+# code signature). A repo checkout keeps the historical $HERE/images layout.
+if [ -f "$HERE/.bundled" ]; then
+  IMAGES="$STATE/images"
+  DEFAULT_SHARE="$STATE/share"
+else
+  IMAGES="$HERE/images"
+  DEFAULT_SHARE="$HERE/share"
+fi
+DISK="${OORT_DISK:-$IMAGES/disk.img}"
+SEED="${OORT_SEED:-$IMAGES/seed.img}"
+GOLDEN="${OORT_GOLDEN:-$IMAGES/disk-golden.img}"
+SHARE="${OORT_SHARE:-$DEFAULT_SHARE}"
+
+# In bundled mode the share's seed content (prebuilt guest agent, optional
+# docker tarball) ships read-only in the app — sync it into the writable
+# state share (the guest also writes back here, e.g. staged kernels).
+sync_bundled_share() {
+  [ -f "$HERE/.bundled" ] || return 0
+  mkdir -p "$SHARE"
+  local f
+  for f in "$HERE"/share/*; do
+    [ -f "$f" ] || continue
+    local dst="$SHARE/$(basename "$f")"
+    [ -f "$dst" ] && [ ! "$f" -nt "$dst" ] && continue
+    cp -c "$f" "$dst" 2>/dev/null || cp "$f" "$dst"
+  done
+}
 # gvproxy user-space netstack (opt-in: OORT_NET=gvproxy). The guest NIC attaches
 # to gvproxy on the host instead of VZ NAT, so traffic follows the Mac's routes/VPN
 # and DNS. gvproxy's default gateway (also its DNS) is 192.168.127.1.
@@ -57,6 +83,10 @@ GVPROXY_GW="192.168.127.1"
 mkdir -p "$STATE"
 
 bin() {
+  # Bundled mode: a prebuilt, pre-entitled, pre-signed engine ships in the app.
+  # NEVER re-sign it — that would break the notarized signature.
+  local pre="$HERE/bin/oort-engine"
+  if [ -x "$pre" ]; then echo "$pre"; return 0; fi
   # Use the stable SwiftPM release symlink directly — don't run `swift build`
   # on every start (it takes the .build package lock, which deadlocks if a
   # previous run is mid-build). Only build when the binary is actually missing.
@@ -153,7 +183,14 @@ cmd_start() {
   [ "${1:-}" = "--home" ] && { MOUNT_HOME=1; shift; }
   if vm_running; then echo "oort already running (pid $(cat "$PIDFILE"))"; return 0; fi
   rm -f "$PIDFILE"   # clear any stale pidfile from a crashed/old run
-  [ -f "$DISK" ] || { echo "no disk image at $DISK — run 'oort build-image' first"; exit 1; }
+  sync_bundled_share
+  if [ ! -f "$DISK" ]; then
+    if [ -f "$HERE/.bundled" ]; then
+      bootstrap_first_run
+    else
+      echo "no disk image at $DISK — run 'oort build-image' first"; exit 1
+    fi
+  fi
   # Guard against a leftover VM still holding the disk image.
   if pgrep -f "oort run .*$DISK" >/dev/null 2>&1; then
     echo "another oort VM is still using $DISK; run 'oort stop' or kill it first"; exit 1
@@ -195,8 +232,8 @@ cmd_start() {
   # forced with OORT_BOOT=efi (the always-safe escape hatch). A custom kernel
   # can be dropped in at the same path; root is /dev/vda1 on the cloud image.
   local boot=()
-  local KERNEL="${OORT_KERNEL:-$HERE/images/kernel-Image}"
-  local INITRD="${OORT_INITRD:-$HERE/images/kernel-initrd}"
+  local KERNEL="${OORT_KERNEL:-$IMAGES/kernel-Image}"
+  local INITRD="${OORT_INITRD:-$IMAGES/kernel-initrd}"
   local KCMDLINE="${OORT_CMDLINE:-console=hvc0 root=/dev/vda1 ro fsck.repair=yes}"
   if [ "${OORT_BOOT:-}" != "efi" ] && [ -f "$KERNEL" ]; then
     boot=(--kernel "$KERNEL" --cmdline "$KCMDLINE")
@@ -388,7 +425,30 @@ cmd_logs() { tail -f "$CONSOLE_LOG"; }
 # boot once so cloud-init finishes (installs Docker etc.), stop cleanly, and
 # snapshot the ready disk. After this, every `oort start` is the fast reuse path
 # (no provisioning) — and `oort reset` can restore the golden image instantly.
+# First run of an installed oort.app (M15): no repo, no images — fetch the
+# Ubuntu cloud image and build the golden disk, all under ~/.oort. Needs
+# qemu-img (the one external tool a raw-image conversion requires).
+CLOUD_IMG_URL="${OORT_CLOUD_IMG_URL:-https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-arm64.img}"
+bootstrap_first_run() {
+  echo "first run — setting up oort under $STATE (one-time, a few minutes)"
+  command -v qemu-img >/dev/null 2>&1 || {
+    echo "qemu-img is required to convert the Ubuntu cloud image:"
+    echo "  brew install qemu"
+    exit 1
+  }
+  mkdir -p "$IMAGES"
+  if [ ! -f "$IMAGES/noble-arm64.img" ]; then
+    echo "downloading Ubuntu 24.04 arm64 cloud image (~600MB)…"
+    curl -fL --retry 3 --progress-bar -o "$IMAGES/noble-arm64.img.part" "$CLOUD_IMG_URL" \
+      || { rm -f "$IMAGES/noble-arm64.img.part"; echo "download failed"; exit 1; }
+    mv "$IMAGES/noble-arm64.img.part" "$IMAGES/noble-arm64.img"
+  fi
+  cmd_build_image
+}
+
 cmd_build_image() {
+  sync_bundled_share
+  mkdir -p "$IMAGES"
   # A force-killed engine can orphan its VZ XPC child, which keeps a byte
   # lock on the disk image — qemu-img then fails with "Failed to lock byte".
   # Clear any holder of OUR disk before rebuilding it.
@@ -397,7 +457,7 @@ cmd_build_image() {
     echo "killing stale processes holding $DISK: $holders"
     echo "$holders" | xargs kill -9 2>/dev/null; sleep 1
   fi
-  (cd "$HERE" && ./make-image.sh)
+  (cd "$HERE" && SRC="$IMAGES/noble-arm64.img" DISK="$DISK" SEED="$SEED" SHARE="$SHARE" ./make-image.sh)
   echo "==> provisioning the image (one-time first boot)…"
   # Provision under EFI, not whatever kernel happens to be staged: EFI is the most
   # robust boot path, and it keeps the golden kernel-agnostic (a custom kernel may
@@ -439,14 +499,14 @@ cmd_build_image() {
     'i=0; while { pgrep -x apt-get || pgrep -x dpkg || fuser /var/lib/dpkg/lock-frontend; } >/dev/null 2>&1; do i=$((i+1)); [ $i -gt 90 ] && exit 0; sleep 2; done; mountpoint -q /mnt/mac || mount -t virtiofs mac /mnt/mac; zcat /boot/vmlinuz-$(uname -r) > /mnt/mac/kernel-Image; cp /boot/initrd.img-$(uname -r) /mnt/mac/kernel-initrd; sync' \
     http://localhost/ >/dev/null 2>&1 || true
   if [ -s "$SHARE/kernel-Image" ]; then
-    mv -f "$SHARE/kernel-Image" "$HERE/images/kernel-Image"
-    mv -f "$SHARE/kernel-initrd" "$HERE/images/kernel-initrd" 2>/dev/null || true
+    mv -f "$SHARE/kernel-Image" "$IMAGES/kernel-Image"
+    mv -f "$SHARE/kernel-initrd" "$IMAGES/kernel-initrd" 2>/dev/null || true
     echo " ok"
   else
     # No fresh kernel staged — a LEFTOVER images/kernel-Image from an earlier
     # build may not match this golden's /lib/modules (the "Unknown symbol"
     # mismatch). Drop it: EFI/GRUB always boots the matching kernel.
-    rm -f "$HERE/images/kernel-Image" "$HERE/images/kernel-initrd"
+    rm -f "$IMAGES/kernel-Image" "$IMAGES/kernel-initrd"
     echo " skipped (will EFI-boot; removed stale kernel-Image)"
   fi
   # Quiesce the guest BEFORE stopping. The background zram step runs apt, which can
@@ -487,8 +547,8 @@ cmd_build_kernel() {
     esac
   done
   [ -s "$SHARE/kernel-Image-custom" ] || { echo "no kernel Image produced (still building? check 'oort exec tail /root/kbuild.log')"; exit 1; }
-  mv -f "$SHARE/kernel-Image-custom" "$HERE/images/kernel-Image"
-  rm -f "$HERE/images/kernel-initrd"   # monolithic kernel → no initramfs
+  mv -f "$SHARE/kernel-Image-custom" "$IMAGES/kernel-Image"
+  rm -f "$IMAGES/kernel-initrd"   # monolithic kernel → no initramfs
   echo "custom kernel installed → images/kernel-Image (monolithic, no initrd)."
   echo "boot it with:  oort restart      (revert any time: OORT_BOOT=efi oort start, or oort build-image)"
 }

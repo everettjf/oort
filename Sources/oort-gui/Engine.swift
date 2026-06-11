@@ -275,6 +275,11 @@ final class AppModel: ObservableObject {
         if let h = ProcessInfo.processInfo.environment["OORT_HOME"] {
             let p = "\(h)/oort"; if FileManager.default.isExecutableFile(atPath: p) { return p }
         }
+        // Self-contained app (M15): the complete oort home ships in Resources.
+        if let res = Bundle.main.resourcePath {
+            let p = "\(res)/oort-home/oort"
+            if FileManager.default.isExecutableFile(atPath: p) { return p }
+        }
         var dir = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().deletingLastPathComponent()
         for _ in 0..<6 {
             let cand = dir.appendingPathComponent("oort").path

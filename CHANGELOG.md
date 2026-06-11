@@ -2,6 +2,20 @@
 
 All notable changes to Oort. Dates are YYYY-MM-DD.
 
+## Unreleased
+
+- **Self-contained `oort.app` — no repo clone needed.** The bundle now ships a
+  complete oort home (CLI, prebuilt + pre-entitled engine, prebuilt guest
+  agent, cloud-init, make-image, the net helper and MCP server, plus a
+  pre-staged Docker tarball for deterministic provisioning; `OORT_APP_SLIM=1`
+  omits it). All mutable data lives under `~/.oort` — the bundle is never
+  written to (that would break its signature). First `oort start` (or GUI
+  launch) downloads the Ubuntu cloud image once and builds the golden disk;
+  `qemu-img` (brew install qemu) is the one external dependency. Verified
+  end-to-end from a pristine fake `$HOME`: bootstrap → provision →
+  direct-kernel boot → `docker run` → clean stop. Repo checkouts keep the
+  old layout (`.bundled` marker switches modes).
+
 ## v0.3.0 — 2026-06-10
 
 The "lives on your Mac" release: the guest's filesystem in Finder, Mac
