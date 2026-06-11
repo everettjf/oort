@@ -2,7 +2,11 @@
 
 All notable changes to Oort. Dates are YYYY-MM-DD.
 
-## Unreleased
+## v0.4.0 — 2026-06-11
+
+The "one-click" release: `brew install` now delivers a fully self-contained
+app — no repo clone, no manual image build. Plus k8s service domains and
+VM-freeze tools for AI agents.
 
 - **k8s service domains — `*.k8s.oort.local`.** `ksvc.k8s.oort.local`
   (default namespace) and `svc.ns.k8s.oort.local` resolve to ClusterIPs: the
