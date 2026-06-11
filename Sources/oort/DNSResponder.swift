@@ -30,9 +30,18 @@ final class DNSResponder {
     private var tableAt: Date = .distantPast
     private let tableTTL: TimeInterval = 2
 
-    init(dockerSocketPath: String, port: UInt16 = 5354) {
+    /// Host Unix socket bridged to the guest agent's exec port — used to ask
+    /// k3s about Services for `*.k8s.oort.local` (M16). Optional: without it,
+    /// k8s names just NXDOMAIN.
+    private let agentSocketPath: String?
+    private var k8sTable: [String: String] = [:]   // "svc.ns" → ClusterIP
+    private var k8sTableAt: Date = .distantPast
+    private let k8sTableTTL: TimeInterval = 5
+
+    init(dockerSocketPath: String, port: UInt16 = 5354, agentSocketPath: String? = nil) {
         self.dockerSocketPath = dockerSocketPath
         self.port = port
+        self.agentSocketPath = agentSocketPath
     }
 
     func start() {
@@ -108,7 +117,14 @@ final class DNSResponder {
 
         var ip: String?
         var rcode: UInt8 = 3 // NXDOMAIN
-        if name.hasSuffix(Self.suffix) {
+        if name.hasSuffix(".k8s" + Self.suffix) {
+            // <svc>.k8s.oort.local (default ns) or <svc>.<ns>.k8s.oort.local
+            let host = String(name.dropLast((".k8s" + Self.suffix).count))
+            if let found = resolveK8s(host) {
+                ip = qtype == 1 ? found : nil
+                rcode = 0
+            }
+        } else if name.hasSuffix(Self.suffix) {
             let host = String(name.dropLast(Self.suffix.count))
             if let found = resolve(host) {
                 ip = qtype == 1 ? found : nil   // answer only A; AAAA/HTTPS → empty
@@ -177,6 +193,68 @@ final class DNSResponder {
             }
         }
         return t
+    }
+
+    // MARK: - k8s Services (M16): "svc" / "svc.ns" → ClusterIP, via the agent
+
+    private func resolveK8s(_ host: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        if Date().timeIntervalSince(k8sTableAt) > k8sTableTTL {
+            k8sTable = buildK8sTable()
+            k8sTableAt = Date()
+        }
+        return k8sTable[host] ?? k8sTable[host + ".default"]
+    }
+
+    /// Ask k3s (inside the guest, via the agent's exec socket) for all
+    /// Services. One line per service: "name ns clusterIP".
+    private func buildK8sTable() -> [String: String] {
+        guard let agentSocketPath else { return [:] }
+        let cmd = #"k3s kubectl get svc -A --no-headers -o custom-columns=N:.metadata.name,NS:.metadata.namespace,IP:.spec.clusterIP 2>/dev/null"#
+        guard let out = execViaAgent(agentSocketPath, cmd) else { return [:] }
+        var t: [String: String] = [:]
+        for line in out.split(separator: "\n") {
+            let parts = line.split(separator: " ", omittingEmptySubsequences: true)
+            guard parts.count >= 3 else { continue }
+            let name = parts[0].lowercased(), ns = parts[1].lowercased(), ip = String(parts[2])
+            guard ip.contains("."), ip != "<none>" else { continue }
+            t["\(name).\(ns)"] = ip
+            if ns == "default" { t[name] = ip }
+        }
+        return t
+    }
+
+    /// POST a command to the agent's exec endpoint via its host Unix socket.
+    private func execViaAgent(_ path: String, _ cmd: String) -> String? {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let bytes = Array(path.utf8)
+        guard bytes.count < MemoryLayout.size(ofValue: addr.sun_path) else { return nil }
+        withUnsafeMutableBytes(of: &addr.sun_path) { $0.copyBytes(from: bytes) }
+        let ok = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard ok == 0 else { return nil }
+        var tv = timeval(tv_sec: 4, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        let req = "POST / HTTP/1.0\r\nContent-Length: \(cmd.utf8.count)\r\nConnection: close\r\n\r\n\(cmd)"
+        _ = req.withCString { write(fd, $0, strlen($0)) }
+        var resp = Data()
+        let n = 64 * 1024
+        let buf = UnsafeMutableRawPointer.allocate(byteCount: n, alignment: 1)
+        defer { buf.deallocate() }
+        while true {
+            let r = read(fd, buf, n)
+            if r <= 0 { break }
+            resp.append(Data(bytes: buf, count: r))
+        }
+        guard let sep = resp.range(of: Data("\r\n\r\n".utf8)) else { return nil }
+        return String(data: resp.subdata(in: sep.upperBound..<resp.endIndex), encoding: .utf8)
     }
 
     /// Minimal HTTP/1.0 GET over the projected Docker Unix socket.

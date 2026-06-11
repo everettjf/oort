@@ -26,7 +26,7 @@ lifecycle / exec / passthrough conveniences.
 | `oort net install\|uninstall\|status` | One-time root helper (sudo once): after it, routes and `*.oort.local` apply automatically — no sudo ever again |
 | `oort route enable\|disable` | Reach containers by their docker0 IP from macOS (sudo-free with the net helper) |
 | `oort domains enable\|route\|disable` | `*.oort.local` names for containers/machines/compose services (sudo, see below) |
-| `oort k8s enable\|disable` | Run Kubernetes (k3s) in the guest |
+| `oort k8s enable\|disable` | Run Kubernetes (k3s) in the guest. With `oort domains`, Services resolve as `<svc>.k8s.oort.local` / `<svc>.<ns>.k8s.oort.local` (ClusterIPs routed via the net helper) |
 | `oort debug <container> [cmd...]` | Toolbox shell into ANY container, even distroless: busybox joins the target's pid+net namespaces; target rootfs at `/proc/1/root` |
 | `oort https enable\|disable` | Trusted `https://web.oort.local` for any container: local CA (trusted once, sudo), TLS terminated in-guest with per-name certs, forwarded to the container's :80. Needs `oort domains` |
 | `oort ssh [setup\|machine [cmd...]]` | `setup` writes a `Host oort` block (guest sshd on a stable `localhost:2222`) — then `ssh oort` and **VS Code Remote-SSH** just work; `oort ssh <machine>` shells into a machine. Key re-injected on every start |

@@ -4,6 +4,15 @@ All notable changes to Oort. Dates are YYYY-MM-DD.
 
 ## Unreleased
 
+- **k8s service domains — `*.k8s.oort.local`.** `ksvc.k8s.oort.local`
+  (default namespace) and `svc.ns.k8s.oort.local` resolve to ClusterIPs: the
+  DNS responder asks k3s through the agent's exec socket (5s cache). The net
+  helper (v2 — rerun `oort net install` once) also routes the k3s ClusterIP
+  range (10.43/16) via the guest, where kube-proxy forwards. Verified live
+  (kubernetes.default, kube-dns.kube-system, a user service).
+- **MCP: `suspend_vm` / `resume_vm` tools.** Agents can freeze the whole
+  sandbox substrate between sessions (~1-2s save, ~1s resume, every process
+  intact) — pairs with snapshot/fork for fully disposable agent workflows.
 - **Self-contained `oort.app` — no repo clone needed.** The bundle now ships a
   complete oort home (CLI, prebuilt + pre-entitled engine, prebuilt guest
   agent, cloud-init, make-image, the net helper and MCP server, plus a

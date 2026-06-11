@@ -107,6 +107,18 @@ def tool_destroy(name, purge=False):
     return out or ("destroyed" if ok else "destroy failed")
 
 
+def tool_suspend_vm():
+    # Freeze the WHOLE VM (every sandbox, mid-process) to disk; resume_vm (or
+    # any next oort start) brings it all back in ~1s exactly where it was.
+    ok, out = _oort(["suspend"], timeout=120)
+    return out or ("suspended" if ok else "suspend failed")
+
+
+def tool_resume_vm():
+    ok, out = _oort(["start"], timeout=300)
+    return out or ("resumed" if ok else "resume failed")
+
+
 # --- tool registry (name -> (schema, handler)) ----------------------------
 
 TOOLS = [
@@ -203,6 +215,21 @@ TOOLS = [
             "required": ["name"],
         },
         "handler": lambda a: tool_destroy(a["name"], bool(a.get("purge", False))),
+    },
+    {
+        "name": "suspend_vm",
+        "description": "Freeze the WHOLE oort VM (all sandboxes, mid-process) to disk in ~1-2s. "
+                       "Use between agent sessions or before risky host work; resume_vm brings "
+                       "everything back exactly where it was, running processes included.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "handler": lambda a: tool_suspend_vm(),
+    },
+    {
+        "name": "resume_vm",
+        "description": "Resume a suspended oort VM (~1s) — every sandbox continues exactly "
+                       "where it was. Safe to call when the VM is already running.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "handler": lambda a: tool_resume_vm(),
     },
 ]
 

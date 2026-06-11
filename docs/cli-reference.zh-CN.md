@@ -28,7 +28,7 @@
 | `oort disk [reclaim [--prune]]` | 查看磁盘占用 / 立即把客户机释放的空间还给 macOS（TRIM → APFS 打洞；`--prune` 先清理无用 docker 数据）。客户机内每日定时器也会自动执行 |
 | `oort fs [open\|mount\|umount]` | 客户机和每台机器的文件系统出现在 Finder 的 `~/Oort`（`guest/`、`machines/<名>/`）——agent 内置 NFS 导出，**免 sudo** 挂载，双向读写。重启/恢复自动重挂，stop/suspend 自动卸载 |
 | `mac <命令…>` *（客户机内）* | 在任意客户机 shell 里**直接跑 Mac 命令**——输出和退出码原样返回（`mac open https://…`、`mac pbpaste`、`mac say done`）。以你的 Mac 用户 + 登录 shell 执行；`--no-mac-exec` 可关闭 |
-| `oort domains enable\|route\|disable` | `*.oort.local` 域名直达容器/机器（见下） |
+| `oort domains enable\|route\|disable` | `*.oort.local` 域名直达容器/机器（见下）；启用 k8s 后 Service 也可用 `<svc>.k8s.oort.local` 解析 |
 | `oort help` | 显示帮助 |
 
 ### `oort domains` —— `*.oort.local` 域名（对标 OrbStack 的 `*.orb.local`）

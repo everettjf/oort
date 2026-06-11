@@ -179,7 +179,10 @@ final class VMManager: NSObject, VZVirtualMachineDelegate {
         }
 
         if cfg.dnsPort > 0 {
-            let dns = DNSResponder(dockerSocketPath: cfg.hostSocketPath, port: cfg.dnsPort)
+            // By CLI convention the first --forward is the agent's exec socket;
+            // the resolver uses it to ask k3s about *.k8s.oort.local Services.
+            let dns = DNSResponder(dockerSocketPath: cfg.hostSocketPath, port: cfg.dnsPort,
+                                   agentSocketPath: cfg.forwards.first?.socketPath)
             dns.start()
             dnsResponder = dns
         }

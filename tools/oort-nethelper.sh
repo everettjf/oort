@@ -19,7 +19,8 @@ set -u
 REQ="${OORT_NET_REQUEST:?}"          # baked into the LaunchDaemon plist
 STATUS="${REQ}.status"               # result note for the user side
 RESOLVER=/etc/resolver/oort.local
-SUBNET=172.17.0.0/16
+SUBNET=172.17.0.0/16                 # docker bridge
+K8SNET=10.43.0.0/16                  # k3s ClusterIP range (kube-proxy on the guest forwards)
 
 note() { echo "$(date '+%H:%M:%S') $*" > "$STATUS" 2>/dev/null || true; }
 
@@ -37,14 +38,17 @@ case "$line" in
     [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] || { note "rejected port $port"; exit 0; }
     route -n delete -net "$SUBNET" >/dev/null 2>&1
     route -n add -net "$SUBNET" "$gw" >/dev/null 2>&1 || { note "route add failed"; exit 0; }
+    route -n delete -net "$K8SNET" >/dev/null 2>&1
+    route -n add -net "$K8SNET" "$gw" >/dev/null 2>&1
     mkdir -p /etc/resolver
     printf 'nameserver 127.0.0.1\nport %s\n' "$port" > "$RESOLVER"
-    note "up: $SUBNET via $gw, resolver port $port"
+    note "up: $SUBNET + $K8SNET via $gw, resolver port $port"
     ;;
   down)
     route -n delete -net "$SUBNET" >/dev/null 2>&1
+    route -n delete -net "$K8SNET" >/dev/null 2>&1
     rm -f "$RESOLVER"
-    note "down: route + resolver removed"
+    note "down: routes + resolver removed"
     ;;
   *)
     note "rejected request"
