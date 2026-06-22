@@ -46,10 +46,13 @@ const (
 	heartbeatPath     = "/run/oort-agent-heartbeat"
 	heartbeatInterval = 10 * time.Second
 
-	// Bound every exec so a single hung command (a wedged `docker` call, a
-	// process that never exits) can't leak its goroutine + fds + child process
-	// forever. Left unbounded, these accumulate until the process hits its fd
-	// limit, at which point accept() spins and the whole agent goes dark.
+	// Default per-exec timeout. Callers can raise it per request via the
+	// X-Oort-Timeout header (sandbox builds/installs routinely run longer than
+	// this); we still bound every exec so a single hung command (a wedged
+	// `docker` call, a process that never exits) can't leak its goroutine + fds
+	// + child process forever. Left unbounded, these accumulate until the
+	// process hits its fd limit, at which point accept() spins and the whole
+	// agent goes dark.
 	execTimeout = 110 * time.Second
 	// Cap concurrent execs so a burst can't exhaust fds/PIDs either.
 	maxConcurrentExec = 64
@@ -309,7 +312,11 @@ func handleShutdown(conn *os.File) {
 }
 
 // handleExec reads one HTTP request whose body is a shell command, runs it,
-// and writes the combined output back as the response body.
+// and writes the combined output back as the response body. The command's exit
+// code is returned in the X-Oort-Exit response header so callers (the oort CLI,
+// the MCP layer, AI agents) can branch on success/failure instead of guessing
+// from output. An optional X-Oort-Timeout request header (seconds) raises the
+// per-exec timeout above the default for long builds/installs.
 func handleExec(conn *os.File) {
 	trackConn(conn)
 	defer untrackConn(conn)
@@ -324,6 +331,13 @@ func handleExec(conn *os.File) {
 		cmd = "echo oort-guest ok"
 	}
 
+	timeout := execTimeout
+	if h := req.Header.Get("X-Oort-Timeout"); h != "" {
+		if n, e := strconv.Atoi(h); e == nil && n > 0 {
+			timeout = time.Duration(n) * time.Second
+		}
+	}
+
 	// Limit concurrency so a burst of execs can't exhaust fds/PIDs.
 	execSem <- struct{}{}
 	defer func() { <-execSem }()
@@ -331,7 +345,7 @@ func handleExec(conn *os.File) {
 	// Run in its own process group and bound it with a timeout, so a hung
 	// command is killed (whole group, including grandchildren) rather than
 	// leaking forever.
-	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	c := exec.CommandContext(ctx, "/bin/sh", "-c", cmd)
 	c.SysProcAttr = &unix.SysProcAttr{Setpgid: true}
@@ -342,11 +356,25 @@ func handleExec(conn *os.File) {
 		}
 		return nil
 	}
-	out, _ := c.CombinedOutput()
+	out, runErr := c.CombinedOutput()
+
+	// Resolve the exit code. 124 = timed out (matching coreutils `timeout`); a
+	// real command failure carries the shell's own exit code; anything that
+	// stopped the command from running at all surfaces as 1 with the reason.
+	exitCode := 0
 	if ctx.Err() == context.DeadlineExceeded {
-		out = append(out, []byte(fmt.Sprintf("\noort-guest: command timed out after %s\n", execTimeout))...)
+		exitCode = 124
+		out = append(out, []byte(fmt.Sprintf("\noort-guest: command timed out after %s\n", timeout))...)
+	} else if runErr != nil {
+		if ee, ok := runErr.(*exec.ExitError); ok {
+			exitCode = ee.ExitCode()
+		} else {
+			exitCode = 1
+			out = append(out, []byte("\noort-guest: "+runErr.Error()+"\n")...)
+		}
 	}
-	fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Length: %s\r\nConnection: close\r\n\r\n",
-		strconv.Itoa(len(out)))
+
+	fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Length: %s\r\nX-Oort-Exit: %d\r\nConnection: close\r\n\r\n",
+		strconv.Itoa(len(out)), exitCode)
 	conn.Write(out)
 }

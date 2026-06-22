@@ -14,14 +14,19 @@ explore alternatives in parallel, **restore** when something breaks, and
 
 | Tool | What it does |
 |---|---|
-| `create_sandbox(name, distro?)` | Create an isolated sandbox (starts the VM if needed). `distro` default `ubuntu`; `alpine` for a tiny fast one. |
-| `exec(name, command)` | Run a shell command **inside** the sandbox; returns combined output. Pipes / redirections / `$VAR` evaluate in the sandbox. |
+| `create_sandbox(name, distro?, profile?, network?, ttl?)` | Create an isolated sandbox (starts the VM if needed). Defaults to the capped **`sandbox`** profile (resource limits + a private network: egress works, your other sandboxes are unreachable). `profile`: `sandbox`\|`locked`\|`open`. `ttl` (secs) lets `gc` reap it later. |
+| `exec(name, command, cwd?, env?)` | Run a shell command **inside** the sandbox; returns combined output. Pipes / redirections / `$VAR` evaluate in the sandbox. On failure the **exit status** is appended. `cwd`/`env` set the working dir and extra env vars. |
+| `write_file(name, path, content)` / `read_file(name, path)` | Write / read a file inside the sandbox (base64 over the reliable exec path — safe for any content). |
 | `snapshot(name, tag?)` | Checkpoint the sandbox filesystem to a tagged image (tag defaults to a timestamp). |
-| `restore(name, tag?)` | Roll the sandbox back to a snapshot (newest if no tag). |
-| `fork(source, name)` | Instantly branch a set-up sandbox into a new one (CoW, no re-provisioning). |
+| `restore(name, tag?)` | Roll the sandbox back to a snapshot (newest if no tag); isolation is preserved. |
+| `fork(source, name)` | Instantly branch a set-up sandbox into a new one (CoW, no re-provisioning; isolation inherited). |
+| `fork_many(source, names)` | Branch into **several** sandboxes at once — source committed once, all share the base. Fan out to explore N approaches in parallel. |
+| `pause(name)` / `unpause(name)` | Freeze / resume one sandbox in place (finer-grained than `suspend_vm`). |
 | `list_sandboxes()` | List sandboxes. |
 | `list_snapshots(name)` | List a sandbox's snapshots. |
+| `gc(older_than?, purge?)` | Reap sandboxes past their TTL / older than N seconds, plus orphaned fork-base images. |
 | `destroy(name, purge?)` | Delete a sandbox; `purge` also drops its snapshots. |
+| `suspend_vm()` / `resume_vm()` | Freeze / resume the **whole** VM (all sandboxes) between sessions. |
 
 ## Wire it into a client
 

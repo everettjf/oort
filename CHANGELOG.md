@@ -2,6 +2,45 @@
 
 All notable changes to Oort. Dates are YYYY-MM-DD.
 
+## Unreleased — v0.5.0 (Agent sandbox layer v1)
+
+Deepens the AI-agent sandbox layer from a thin shell-out into something an agent
+can rely on for parallel, untrusted, long-running work. Host CLI + MCP only —
+**except** the exec exit-code/timeout fix, which needs a guest-agent rebuild
+(`make share/oort-guest` + `oort build-image`). See
+[`docs/agent-sandbox-plan.md`](docs/agent-sandbox-plan.md) and
+[`docs/strategy.md`](docs/strategy.md).
+
+- **Agent-grade `exec`.** The guest now returns each command's real **exit
+  code** (`X-Oort-Exit` header → propagated through the CLI and surfaced to MCP
+  agents) instead of discarding it, and the per-exec **timeout is caller-set**
+  (`X-Oort-Timeout`, default 600s end-to-end) — long builds/installs no longer
+  hit a silent 110s wall. MCP `exec` also takes `cwd` and `env`.
+- **File I/O over the reliable path.** MCP `read_file` / `write_file` ship bytes
+  base64-encoded through `machine exec` (no fragile heredocs, no hijacked docker
+  cp stream).
+- **Isolation, by default for agents.** New `--profile open|sandbox|locked` on
+  `oort machine create` bundles resource caps (`--memory`/`--cpus`/`--pids`) and
+  a network policy (`--network default|none|isolated`, where `isolated` is a
+  private per-sandbox bridge — egress works, peers unreachable). The CLI default
+  stays `open` (unchanged for humans / `oort up`); MCP `create_sandbox` defaults
+  to the capped `sandbox` profile, so untrusted agent code is bounded by default.
+  `fork`/`restore` inherit the source's isolation (an `isolated` fork gets its
+  own bridge).
+- **Cheap parallel fork.** `oort machine fork <src> <a> <b> <c>` (and MCP
+  `fork_many`) commits the source **once** and runs every fork from that shared
+  base image — fan out N ways without N commits. Orphaned base images are pruned
+  by `gc`.
+- **Lifecycle hygiene.** Machines are stamped with `oort.created`/`oort.ttl`
+  labels; `oort machine gc [--older-than <secs>] [--purge]` (MCP `gc`) reaps
+  expired/old sandboxes and dangling fork-base images. `create --ttl` /
+  `create_sandbox(ttl=…)` set a self-cleanup deadline.
+- **Per-sandbox freeze.** `oort machine pause|unpause` (MCP `pause`/`unpause`)
+  freezes one sandbox without touching the others — finer-grained than
+  `suspend_vm`.
+- **Concurrent MCP server.** `tools/call` now runs on a thread pool, so an agent
+  forking N sandboxes at once gets real parallelism instead of serialized calls.
+
 ## v0.4.0 — 2026-06-11
 
 The "one-click" release: `brew install` now delivers a fully self-contained
