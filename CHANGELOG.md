@@ -40,6 +40,13 @@ can rely on for parallel, untrusted, long-running work. Host CLI + MCP only —
   `suspend_vm`.
 - **Concurrent MCP server.** `tools/call` now runs on a thread pool, so an agent
   forking N sandboxes at once gets real parallelism instead of serialized calls.
+  Calls touching the **same** sandbox are serialized in arrival order (a pipelined
+  create→write→read can't race); different sandboxes still run in parallel.
+- **Friendlier flags.** Durations take `s/m/h/d` suffixes (`--ttl 2h`,
+  `gc --older-than 30m`); short aliases `-p`/`-m`/`--net`; the network mode reads
+  `shared` (the old `default` still works); and `oort stop --force` / `oort machine
+  pause|unpause` round out the lifecycle controls. `oort machine list` shows a
+  fork's real distro instead of a base-image tag.
 
 ## v0.4.0 — 2026-06-11
 

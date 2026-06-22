@@ -50,13 +50,13 @@ cannot. "git for dev environments."
 
 | Command | Description |
 |---|---|
-| `oort machine create <name> [distro] [opts]` | Create a machine (default distro `ubuntu`). Opts: `--ttl <secs>`, `--profile open\|sandbox\|locked`, `--memory V`, `--cpus V`, `--pids N`, `--network default\|none\|isolated` |
+| `oort machine create <name> [distro] [opts]` | Create a machine (default distro `ubuntu`). Opts: `--profile`/`-p open\|sandbox\|locked`, `--ttl <dur>` (e.g. `2h`, `30m`, `90s`), `--memory`/`-m V`, `--cpus V`, `--pids N`, `--network`/`--net shared\|none\|isolated` |
 | `oort machine list` | List machines |
 | `oort machine shell <name>` | Interactive shell into a machine |
 | `oort machine exec <name> <cmd...>` | Run a command in a machine (returns the command's real exit code) |
 | `oort machine pause\|unpause <name>` | Freeze / resume a single machine in place (cheaper than `oort suspend`, per-machine) |
 | `oort machine delete <name> [--purge]` | Delete the machine (+ its isolated bridge); `--purge` also drops its snapshots |
-| `oort machine gc [--older-than <secs>] [--purge]` | Reap machines past their TTL / older than N seconds, plus orphaned fork-base images |
+| `oort machine gc [--older-than <dur>] [--purge]` | Reap machines past their TTL / older than a duration (e.g. `30m`, `2h`), plus orphaned fork-base images |
 | `oort machine snapshot <name> [tag]` | Commit the machine's live state to a tagged image (tag defaults to a timestamp) |
 | `oort machine snapshots <name>` | List a machine's snapshots |
 | `oort machine restore <name> [tag]` | Roll a machine back to a snapshot (newest if no tag); isolation is preserved |
@@ -75,7 +75,8 @@ oort machine snapshot devbox clean-baseline        # checkpoint
 # … experiment, maybe break things …
 oort machine restore devbox clean-baseline         # roll back
 oort machine fork devbox feat-a feat-b feat-c      # fan out 3 parallel envs (one commit)
-oort machine gc --older-than 3600 --purge          # clean up old sandboxes
+oort machine create scratch -p sandbox --ttl 2h    # capped, isolated, self-cleans after 2h
+oort machine gc --older-than 1h --purge            # clean up old sandboxes
 ```
 
 ### `oort domains` — `*.oort.local` names (OrbStack's `*.orb.local`)

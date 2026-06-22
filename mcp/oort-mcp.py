@@ -224,7 +224,7 @@ TOOLS = [
                 "name": {"type": "string", "description": "Sandbox name (e.g. 'scratch', 'build-test')."},
                 "distro": {"type": "string", "description": "Base image / distro. Default 'ubuntu'. Try 'alpine' for a tiny fast sandbox.", "default": "ubuntu"},
                 "profile": {"type": "string", "enum": ["sandbox", "locked", "open"], "description": "Isolation profile. 'sandbox' (default): 2g/2cpu/512pids + private network (egress, peer-isolated). 'locked': 1g/1cpu/256pids + NO network (pure compute). 'open': no caps, shared network (only for trusted code).", "default": "sandbox"},
-                "network": {"type": "string", "enum": ["default", "none", "isolated"], "description": "Override the profile's network: 'isolated' (private bridge, egress ok), 'none' (no network), 'default' (shared bridge, reaches peers)."},
+                "network": {"type": "string", "enum": ["shared", "none", "isolated"], "description": "Override the profile's network: 'isolated' (private bridge, egress ok, peers unreachable), 'none' (no network), 'shared' (default bridge, can reach your other sandboxes)."},
                 "ttl": {"type": "integer", "description": "Optional time-to-live in seconds. After this, 'gc' will reap the sandbox — use it so a forgotten or abandoned sandbox cleans itself up."},
             },
             "required": ["name"],
