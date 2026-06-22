@@ -729,7 +729,7 @@ MACHINE_NET_PREFIX="oort-net-"   # per-sandbox isolated bridge networks
 _machine_net() {
   local name="$1" mode="$2"
   case "$mode" in
-    default|"") : ;;
+    shared|default|"") : ;;
     none) echo none ;;
     isolated)
       local net="$MACHINE_NET_PREFIX$name"
@@ -761,7 +761,7 @@ _machine_isolation_flags() {
     case "$net" in
       none)     f+=(--network none --label oort.network=none) ;;
       isolated) local n; n="$(_machine_net "$newname" isolated)"; [ -n "$n" ] && f+=(--network "$n" --label oort.network=isolated) ;;
-      default)  f+=(--label oort.network=default) ;;
+      shared|default) f+=(--label oort.network=shared) ;;
     esac
   fi
   [ ${#f[@]} -gt 0 ] && printf '%s\n' "${f[@]}"
@@ -789,13 +789,31 @@ _machine_latest_snap() {
     | sort -t"$(printf '\t')" -k2 | tail -1 | cut -f1
 }
 
+# Parse a human duration to seconds: 90 / 90s / 30m / 2h / 1d (bare = seconds).
+# Lets `--ttl 2h` / `gc --older-than 30m` read naturally instead of raw seconds.
+_dur2secs() {
+  local v="$1" n unit
+  case "$v" in
+    *[smhd]) n="${v%?}"; unit="${v##*[0-9]}" ;;
+    *)       n="$v";     unit="" ;;
+  esac
+  case "$n" in *[!0-9]*|"") echo "invalid duration '$v' (use e.g. 90, 90s, 30m, 2h, 1d)" >&2; return 1 ;; esac
+  case "$unit" in
+    s|"") echo "$n" ;;
+    m)    echo "$((n * 60))" ;;
+    h)    echo "$((n * 3600))" ;;
+    d)    echo "$((n * 86400))" ;;
+  esac
+}
+
 cmd_machine() {
   local sub="${1:-list}"; shift || true
   case "$sub" in
     create)
-      # oort machine create <name> [distro] [--ttl <secs>] [--profile P]
-      #   [--memory V] [--cpus V] [--pids N] [--network default|none|isolated]
-      # Profiles bundle resource caps + network policy; explicit flags override.
+      # oort machine create <name> [distro] [--profile|-p P] [--ttl 2h]
+      #   [--memory|-m V] [--cpus V] [--pids N] [--network|--net shared|none|isolated]
+      # Durations accept s/m/h/d (e.g. --ttl 90m). Profiles bundle resource caps +
+      # network policy; explicit flags override.
       #   open    — no caps, shared network (the CLI default; for trusted use)
       #   sandbox — 2g / 2 cpus / 512 pids, isolated network (egress, peer-isolated)
       #   locked  — 1g / 1 cpu  / 256 pids, no network (pure-compute isolation)
@@ -803,16 +821,16 @@ cmd_machine() {
       local mem="" cpus="" pids="" network=""
       while [ $# -gt 0 ]; do
         case "$1" in
-          --ttl) ttl="${2:-}"; shift 2;;
-          --profile) profile="${2:-}"; shift 2;;
-          --memory) mem="${2:-}"; shift 2;;
+          --ttl) ttl="$(_dur2secs "${2:-}")" || exit 1; shift 2;;
+          --profile|-p) profile="${2:-}"; shift 2;;
+          --memory|-m) mem="${2:-}"; shift 2;;
           --cpus) cpus="${2:-}"; shift 2;;
           --pids) pids="${2:-}"; shift 2;;
-          --network) network="${2:-}"; shift 2;;
+          --network|--net) network="${2:-}"; shift 2;;
           *) if [ -z "$name" ]; then name="$1"; elif [ -z "$distro" ]; then distro="$1"; fi; shift;;
         esac
       done
-      [ -n "$name" ] || { echo "usage: oort machine create <name> [distro] [--ttl <secs>] [--profile open|sandbox|locked] [--memory V] [--cpus V] [--pids N] [--network default|none|isolated]"; exit 1; }
+      [ -n "$name" ] || { echo "usage: oort machine create <name> [distro] [--profile open|sandbox|locked] [--ttl 2h] [--memory V] [--cpus V] [--pids N] [--network shared|none|isolated]"; exit 1; }
       distro="${distro:-ubuntu}"
       # Apply the profile baseline (only where the user didn't set an explicit flag).
       case "$profile" in
@@ -821,8 +839,10 @@ cmd_machine() {
         locked)  : "${mem:=1g}" "${cpus:=1}" "${pids:=256}" "${network:=none}" ;;
         *) echo "unknown profile '$profile' (open|sandbox|locked)"; exit 1 ;;
       esac
-      : "${network:=default}"
-      case "$network" in default|none|isolated) ;; *) echo "unknown network '$network' (default|none|isolated)"; exit 1 ;; esac
+      : "${network:=shared}"
+      # 'shared' is the friendly name for docker's default bridge; accept both.
+      [ "$network" = default ] && network=shared
+      case "$network" in shared|none|isolated) ;; *) echo "unknown network '$network' (shared|none|isolated)"; exit 1 ;; esac
       cmd_docker container inspect "$MACHINE_PREFIX$name" >/dev/null 2>&1 && { echo "machine '$name' already exists"; exit 1; }
       cmd_docker image inspect "$distro" >/dev/null 2>&1 || { echo "pulling ${distro}…"; cmd_docker pull "$distro" >/dev/null; }
       # Apply caps AND stamp them as labels, so `fork`/`restore` can reproduce
@@ -935,14 +955,14 @@ cmd_machine() {
       ;;
     gc)
       # Reap agent sandboxes that have outlived their TTL (created+ttl <= now),
-      # and/or anything older than --older-than <secs>. Snapshots are kept unless
-      # --purge. Safe to run periodically; only touches oort machines.
+      # and/or anything older than --older-than <dur> (e.g. 30m, 2h). Snapshots
+      # are kept unless --purge. Safe to run periodically; only touches oort machines.
       local purge="" older=""
       while [ $# -gt 0 ]; do
         case "$1" in
           --purge) purge="--purge"; shift;;
-          --older-than) older="${2:-}"; shift 2;;
-          *) echo "usage: oort machine gc [--older-than <secs>] [--purge]"; exit 1;;
+          --older-than) older="$(_dur2secs "${2:-}")" || exit 1; shift 2;;
+          *) echo "usage: oort machine gc [--older-than 30m] [--purge]"; exit 1;;
         esac
       done
       local now reaped=0; now="$(date +%s)"
@@ -979,11 +999,12 @@ cmd_machine() {
       local name="${1:?usage: oort machine unpause <name>}"
       cmd_docker unpause "$MACHINE_PREFIX$name" >/dev/null && echo "unpaused '$name'"
       ;;
-    *) echo "usage: oort machine create|list|exec|shell|delete <name> [distro] [--ttl <secs>] [--profile P]
+    *) echo "usage: oort machine create <name> [distro] [-p open|sandbox|locked] [--ttl 2h] [--net shared|none|isolated]
+                    oort machine list|exec|shell|delete <name>
        time-travel: oort machine snapshot|snapshots|restore <name> [tag]
                     oort machine fork <src> <newname> [<newname>...]
        lifecycle:   oort machine pause|unpause <name>
-                    oort machine gc [--older-than <secs>] [--purge]";;
+                    oort machine gc [--older-than 30m] [--purge]";;
   esac
 }
 
