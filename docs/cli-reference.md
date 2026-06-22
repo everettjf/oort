@@ -50,15 +50,23 @@ cannot. "git for dev environments."
 
 | Command | Description |
 |---|---|
-| `oort machine create <name> [distro]` | Create a machine (default distro `ubuntu`) |
+| `oort machine create <name> [distro] [opts]` | Create a machine (default distro `ubuntu`). Opts: `--ttl <secs>`, `--profile open\|sandbox\|locked`, `--memory V`, `--cpus V`, `--pids N`, `--network default\|none\|isolated` |
 | `oort machine list` | List machines |
 | `oort machine shell <name>` | Interactive shell into a machine |
-| `oort machine exec <name> <cmd...>` | Run a command in a machine |
-| `oort machine delete <name> [--purge]` | Delete the machine; `--purge` also drops its snapshots |
+| `oort machine exec <name> <cmd...>` | Run a command in a machine (returns the command's real exit code) |
+| `oort machine pause\|unpause <name>` | Freeze / resume a single machine in place (cheaper than `oort suspend`, per-machine) |
+| `oort machine delete <name> [--purge]` | Delete the machine (+ its isolated bridge); `--purge` also drops its snapshots |
+| `oort machine gc [--older-than <secs>] [--purge]` | Reap machines past their TTL / older than N seconds, plus orphaned fork-base images |
 | `oort machine snapshot <name> [tag]` | Commit the machine's live state to a tagged image (tag defaults to a timestamp) |
 | `oort machine snapshots <name>` | List a machine's snapshots |
-| `oort machine restore <name> [tag]` | Roll a machine back to a snapshot (newest if no tag) |
-| `oort machine fork <src> <newname>` | **Instantly branch** a fully-set-up machine into a new one (CoW, no re-provisioning) |
+| `oort machine restore <name> [tag]` | Roll a machine back to a snapshot (newest if no tag); isolation is preserved |
+| `oort machine fork <src> <newname> [<newname>...]` | **Instantly branch** a fully-set-up machine into one or more new ones (CoW, no re-provisioning; source committed once; isolation inherited) |
+
+**Isolation profiles** (caps + network; explicit flags override). `open` (the CLI
+default): no caps, shared network. `sandbox`: 2g / 2 cpus / 512 pids + a private
+bridge (egress works, peers unreachable). `locked`: 1g / 1 cpu / 256 pids + no
+network. The MCP `create_sandbox` tool defaults to `sandbox`, so untrusted agent
+code is bounded by default.
 
 ```bash
 oort machine create devbox ubuntu
@@ -66,7 +74,8 @@ oort machine exec devbox apt-get install -y …      # configure it
 oort machine snapshot devbox clean-baseline        # checkpoint
 # … experiment, maybe break things …
 oort machine restore devbox clean-baseline         # roll back
-oort machine fork devbox feature-x                 # branch into a parallel env
+oort machine fork devbox feat-a feat-b feat-c      # fan out 3 parallel envs (one commit)
+oort machine gc --older-than 3600 --purge          # clean up old sandboxes
 ```
 
 ### `oort domains` — `*.oort.local` names (OrbStack's `*.orb.local`)

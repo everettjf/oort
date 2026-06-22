@@ -406,13 +406,24 @@ cmd_status() {
 
 cmd_exec() {
   [ $# -gt 0 ] || { echo "usage: oort exec <command...>"; exit 1; }
-  curl -s --max-time 125 --unix-socket "$AGENT_SOCK" -X POST --data-binary "$*" http://localhost/ \
-    || { echo "guest agent unreachable (is the VM started?)"; exit 1; }
+  # Per-exec budget (seconds). Default generous for sandbox builds/installs;
+  # override with OORT_EXEC_TIMEOUT. The agent enforces it (X-Oort-Timeout) and
+  # returns the command's exit code in X-Oort-Exit, which we propagate so
+  # callers (and the MCP layer) can branch on success/failure.
+  local t="${OORT_EXEC_TIMEOUT:-600}"
+  local hdr; hdr="$(mktemp -t oort-exec)"
+  curl -s --max-time "$((t + 20))" --unix-socket "$AGENT_SOCK" \
+       -H "X-Oort-Timeout: $t" -D "$hdr" \
+       -X POST --data-binary "$*" http://localhost/ \
+    || { rm -f "$hdr"; echo "guest agent unreachable (is the VM started?)"; exit 1; }
+  local code; code="$(awk 'tolower($1)=="x-oort-exit:"{print $2}' "$hdr" | tr -dc 0-9)"
+  rm -f "$hdr"
+  return "${code:-0}"
 }
 
 cmd_shell() {
   echo "oort guest shell — type commands, 'exit' to quit"
-  while true; do printf 'guest$ '; IFS= read -r line || break; [ "$line" = exit ] && break; [ -z "$line" ] && continue; cmd_exec "$line"; done
+  while true; do printf 'guest$ '; IFS= read -r line || break; [ "$line" = exit ] && break; [ -z "$line" ] && continue; cmd_exec "$line" || true; done
 }
 
 cmd_env() { echo "export DOCKER_HOST=unix://$DOCKER_SOCK"; }
@@ -698,12 +709,67 @@ cmd_gui() {
 # fully-set-up machine into a new one (CoW image layers, no re-provisioning).
 MACHINE_PREFIX="ovm-"
 SNAP_REPO="oort-machine"   # local docker repo namespace for machine snapshots
+MACHINE_NET_PREFIX="oort-net-"   # per-sandbox isolated bridge networks
+
+# Resolve the docker --network value for a machine, creating a dedicated
+# isolated bridge on demand. Prints the value to pass to `--network` (empty for
+# the shared default bridge, so the caller adds no flag):
+#   default  → shared default bridge (peers reachable; prints nothing)
+#   none     → no network at all (pure-compute isolation)
+#   isolated → a private per-sandbox bridge: egress works, but other
+#              containers/machines are unreachable (and can't reach it)
+_machine_net() {
+  local name="$1" mode="$2"
+  case "$mode" in
+    default|"") : ;;
+    none) echo none ;;
+    isolated)
+      local net="$MACHINE_NET_PREFIX$name"
+      cmd_docker network inspect "$net" >/dev/null 2>&1 \
+        || cmd_docker network create --driver bridge "$net" >/dev/null
+      echo "$net" ;;
+  esac
+}
+
+# Read the isolation (caps + network) stamped on an existing machine container
+# or snapshot image (<ref>) and print the docker run flags to reproduce it on a
+# fork/restore named <newname> — one token per line. An 'isolated' source yields
+# a *fresh* private bridge for <newname>, so forks stay isolated from each other
+# too. Empty output (an 'open' source with no labels) → the new machine is open.
+_machine_isolation_flags() {
+  local ref="$1" newname="$2"
+  local mem cpus pids net
+  mem="$(cmd_docker inspect -f '{{ index .Config.Labels "oort.memory" }}' "$ref" 2>/dev/null)"
+  cpus="$(cmd_docker inspect -f '{{ index .Config.Labels "oort.cpus" }}' "$ref" 2>/dev/null)"
+  pids="$(cmd_docker inspect -f '{{ index .Config.Labels "oort.pids" }}' "$ref" 2>/dev/null)"
+  net="$(cmd_docker inspect -f '{{ index .Config.Labels "oort.network" }}' "$ref" 2>/dev/null)"
+  local f=()
+  [ -n "$mem" ]  && [ "$mem" != "<no value>" ]  && f+=(--memory "$mem"       --label "oort.memory=$mem")
+  [ -n "$cpus" ] && [ "$cpus" != "<no value>" ] && f+=(--cpus "$cpus"         --label "oort.cpus=$cpus")
+  [ -n "$pids" ] && [ "$pids" != "<no value>" ] && f+=(--pids-limit "$pids"   --label "oort.pids=$pids")
+  if [ -n "$net" ] && [ "$net" != "<no value>" ]; then
+    case "$net" in
+      none)     f+=(--network none --label oort.network=none) ;;
+      isolated) local n; n="$(_machine_net "$newname" isolated)"; [ -n "$n" ] && f+=(--network "$n" --label oort.network=isolated) ;;
+      default)  f+=(--label oort.network=default) ;;
+    esac
+  fi
+  [ ${#f[@]} -gt 0 ] && printf '%s\n' "${f[@]}"
+}
 
 # Run the idle "machine" container <name> from <image> (the shared shape used by
 # create / restore / fork). Long-lived + auto-restart; you exec/shell into it.
 _machine_run() {
-  local name="$1" image="$2"
+  local name="$1" image="$2" ttl="${3:-}"
+  shift 2; [ $# -gt 0 ] && shift   # drop name+image, then ttl; rest = extra docker flags
+  local extra=("$@")
+  # Stamp lifecycle labels so `oort machine gc` can reap by age / TTL — agent
+  # sandboxes that outlive their run (a crashed agent, an abandoned fork) get
+  # cleaned up instead of stranding containers + snapshot images forever.
+  local labels=(--label oort.machine=1 --label "oort.created=$(date +%s)")
+  [ -n "$ttl" ] && labels+=(--label "oort.ttl=$ttl")
   cmd_docker run -d --name "$MACHINE_PREFIX$name" --hostname "$name" --restart unless-stopped \
+    "${labels[@]}" ${extra[@]+"${extra[@]}"} \
     "$image" sh -c 'while :; do sleep 3600; done' >/dev/null
 }
 
@@ -717,11 +783,48 @@ cmd_machine() {
   local sub="${1:-list}"; shift || true
   case "$sub" in
     create)
-      local name="${1:?usage: oort machine create <name> [distro]}" distro="${2:-ubuntu}"
+      # oort machine create <name> [distro] [--ttl <secs>] [--profile P]
+      #   [--memory V] [--cpus V] [--pids N] [--network default|none|isolated]
+      # Profiles bundle resource caps + network policy; explicit flags override.
+      #   open    — no caps, shared network (the CLI default; for trusted use)
+      #   sandbox — 2g / 2 cpus / 512 pids, isolated network (egress, peer-isolated)
+      #   locked  — 1g / 1 cpu  / 256 pids, no network (pure-compute isolation)
+      local name="" distro="" ttl="" profile="open"
+      local mem="" cpus="" pids="" network=""
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --ttl) ttl="${2:-}"; shift 2;;
+          --profile) profile="${2:-}"; shift 2;;
+          --memory) mem="${2:-}"; shift 2;;
+          --cpus) cpus="${2:-}"; shift 2;;
+          --pids) pids="${2:-}"; shift 2;;
+          --network) network="${2:-}"; shift 2;;
+          *) if [ -z "$name" ]; then name="$1"; elif [ -z "$distro" ]; then distro="$1"; fi; shift;;
+        esac
+      done
+      [ -n "$name" ] || { echo "usage: oort machine create <name> [distro] [--ttl <secs>] [--profile open|sandbox|locked] [--memory V] [--cpus V] [--pids N] [--network default|none|isolated]"; exit 1; }
+      distro="${distro:-ubuntu}"
+      # Apply the profile baseline (only where the user didn't set an explicit flag).
+      case "$profile" in
+        open) : ;;
+        sandbox) : "${mem:=2g}" "${cpus:=2}" "${pids:=512}" "${network:=isolated}" ;;
+        locked)  : "${mem:=1g}" "${cpus:=1}" "${pids:=256}" "${network:=none}" ;;
+        *) echo "unknown profile '$profile' (open|sandbox|locked)"; exit 1 ;;
+      esac
+      : "${network:=default}"
+      case "$network" in default|none|isolated) ;; *) echo "unknown network '$network' (default|none|isolated)"; exit 1 ;; esac
       cmd_docker container inspect "$MACHINE_PREFIX$name" >/dev/null 2>&1 && { echo "machine '$name' already exists"; exit 1; }
       cmd_docker image inspect "$distro" >/dev/null 2>&1 || { echo "pulling ${distro}…"; cmd_docker pull "$distro" >/dev/null; }
-      _machine_run "$name" "$distro" \
-        && echo "machine '$name' ($distro) created — 'oort machine shell $name'"
+      # Apply caps AND stamp them as labels, so `fork`/`restore` can reproduce
+      # the same isolation on the new machine.
+      local extra=(--label "oort.network=$network")
+      [ -n "$mem" ]  && extra+=(--memory "$mem"      --label "oort.memory=$mem")
+      [ -n "$cpus" ] && extra+=(--cpus "$cpus"        --label "oort.cpus=$cpus")
+      [ -n "$pids" ] && extra+=(--pids-limit "$pids"  --label "oort.pids=$pids")
+      local netname; netname="$(_machine_net "$name" "$network")"
+      [ -n "$netname" ] && extra+=(--network "$netname")
+      _machine_run "$name" "$distro" "$ttl" ${extra[@]+"${extra[@]}"} \
+        && echo "machine '$name' ($distro, profile=$profile, net=$network) created — 'oort machine shell $name'"
       ;;
     snapshot|commit)
       # Commit the machine's live filesystem to a tagged, content-addressed image.
@@ -744,21 +847,39 @@ cmd_machine() {
       [ -n "$tag" ] || tag="$(_machine_latest_snap "$name")"
       [ -n "$tag" ] || { echo "no snapshots for '$name' — run 'oort machine snapshot $name' first"; exit 1; }
       cmd_docker image inspect "$SNAP_REPO/$name:$tag" >/dev/null 2>&1 || { echo "no snapshot '$name:$tag'"; exit 1; }
+      # Carry the machine's isolation across the rebuild. Read it from the live
+      # container if present, else fall back to the snapshot image's labels.
+      local rref="$MACHINE_PREFIX$name"
+      cmd_docker container inspect "$rref" >/dev/null 2>&1 || rref="$SNAP_REPO/$name:$tag"
+      local iso=()
+      while IFS= read -r line; do [ -n "$line" ] && iso+=("$line"); done < <(_machine_isolation_flags "$rref" "$name")
       cmd_docker rm -f "$MACHINE_PREFIX$name" >/dev/null 2>&1 || true
-      _machine_run "$name" "$SNAP_REPO/$name:$tag" \
+      _machine_run "$name" "$SNAP_REPO/$name:$tag" "" ${iso[@]+"${iso[@]}"} \
         && echo "restored '$name' from snapshot $tag"
       ;;
     fork|clone)
-      # Instantly branch a fully-set-up machine into a new one. The new machine
-      # shares the source's image layers (CoW) — no re-provisioning, no copy.
-      local src="${1:?usage: oort machine fork <src> <newname>}"
-      local dst="${2:?usage: oort machine fork <src> <newname>}"
+      # Branch a fully-set-up machine into one OR MORE new ones. The source is
+      # committed ONCE into a shared base image; every fork runs from it (CoW
+      # layers — no re-provisioning, no copy), so forking N ways is cheap and
+      # parallel-friendly. Each fork inherits the source's isolation; an
+      # 'isolated' source gives every fork its OWN private bridge (siblings can't
+      # reach each other). Orphaned base images are pruned by `oort machine gc`.
+      local src="${1:?usage: oort machine fork <src> <newname> [<newname>...]}"; shift || true
+      [ $# -gt 0 ] || { echo "usage: oort machine fork <src> <newname> [<newname>...]"; exit 1; }
       cmd_docker container inspect "$MACHINE_PREFIX$src" >/dev/null 2>&1 || { echo "no machine '$src'"; exit 1; }
-      cmd_docker container inspect "$MACHINE_PREFIX$dst" >/dev/null 2>&1 && { echo "machine '$dst' already exists"; exit 1; }
-      printf "forking '%s' → '%s'…" "$src" "$dst"
-      cmd_docker commit "$MACHINE_PREFIX$src" "$SNAP_REPO/$dst:forked-from-$src" >/dev/null
-      _machine_run "$dst" "$SNAP_REPO/$dst:forked-from-$src" \
-        && echo " done — 'oort machine shell $dst'"
+      local dst
+      for dst in "$@"; do
+        cmd_docker container inspect "$MACHINE_PREFIX$dst" >/dev/null 2>&1 && { echo "machine '$dst' already exists"; exit 1; }
+      done
+      local base="$SNAP_REPO/$src:fork-base-$(date +%s)-$1"
+      printf "committing '%s' once, forking →" "$src"
+      cmd_docker commit "$MACHINE_PREFIX$src" "$base" >/dev/null
+      for dst in "$@"; do
+        local iso=()
+        while IFS= read -r line; do [ -n "$line" ] && iso+=("$line"); done < <(_machine_isolation_flags "$MACHINE_PREFIX$src" "$dst")
+        _machine_run "$dst" "$base" "" ${iso[@]+"${iso[@]}"} && printf " %s" "$dst"
+      done
+      echo "   (each: 'oort machine shell <name>')"
       ;;
     list|ls)
       echo "NAME            DISTRO          STATUS"
@@ -792,15 +913,65 @@ cmd_machine() {
       # can re-`restore`); add `--purge` to also drop the snapshot images.
       local name="${1:?usage: oort machine delete <name> [--purge]}"
       cmd_docker rm -f "$MACHINE_PREFIX$name" >/dev/null && echo "machine '$name' deleted"
+      # Drop the per-sandbox isolated bridge if this machine had one (no-op otherwise).
+      cmd_docker network rm "$MACHINE_NET_PREFIX$name" >/dev/null 2>&1 || true
       if [ "${2:-}" = "--purge" ]; then
         cmd_docker images "$SNAP_REPO/$name" --format '{{.Repository}}:{{.Tag}}' \
           | xargs -r -n1 -I{} sh -c "DOCKER_HOST=unix://$DOCKER_SOCK docker rmi -f {} >/dev/null 2>&1" \
           && echo "snapshots of '$name' purged"
       fi
       ;;
-    *) echo "usage: oort machine create|list|exec|shell|delete <name> [distro]
+    gc)
+      # Reap agent sandboxes that have outlived their TTL (created+ttl <= now),
+      # and/or anything older than --older-than <secs>. Snapshots are kept unless
+      # --purge. Safe to run periodically; only touches oort machines.
+      local purge="" older=""
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --purge) purge="--purge"; shift;;
+          --older-than) older="${2:-}"; shift 2;;
+          *) echo "usage: oort machine gc [--older-than <secs>] [--purge]"; exit 1;;
+        esac
+      done
+      local now reaped=0; now="$(date +%s)"
+      local tab; tab="$(printf '\t')"
+      while IFS="$tab" read -r cname created ttl; do
+        [ -n "$cname" ] || continue
+        local reap=0
+        if [ -n "$older" ] && [ -n "$created" ] && [ $((now - created)) -ge "$older" ]; then reap=1; fi
+        if [ -n "$ttl" ] && [ -n "$created" ] && [ $((created + ttl)) -le "$now" ]; then reap=1; fi
+        if [ "$reap" = 1 ]; then
+          local mname="${cname#"$MACHINE_PREFIX"}"
+          if cmd_machine delete "$mname" $purge >/dev/null 2>&1; then
+            echo "reaped '$mname'"; reaped=$((reaped + 1))
+          fi
+        fi
+      done < <(cmd_docker ps -a --filter "name=$MACHINE_PREFIX" \
+                --format "{{.Names}}${tab}{{.Label \"oort.created\"}}${tab}{{.Label \"oort.ttl\"}}")
+      # Prune orphaned fork-base images (shared parents left after all their
+      # forks are gone). `rmi` refuses ones still backing a container, so this
+      # only removes truly unreferenced bases.
+      local pruned=0 img
+      while IFS= read -r img; do
+        [ -n "$img" ] || continue
+        cmd_docker rmi "$img" >/dev/null 2>&1 && pruned=$((pruned + 1))
+      done < <(cmd_docker images --filter "reference=$SNAP_REPO/*:fork-base-*" --format '{{.Repository}}:{{.Tag}}' 2>/dev/null)
+      echo "gc: reaped $reaped machine(s)$([ -n "$purge" ] && echo ' (snapshots purged)')$([ "$pruned" -gt 0 ] && echo ", pruned $pruned fork-base image(s)")"
+      ;;
+    pause)
+      local name="${1:?usage: oort machine pause <name>}"
+      cmd_docker pause "$MACHINE_PREFIX$name" >/dev/null \
+        && echo "paused '$name' (frozen in place; 'oort machine unpause $name' to resume)"
+      ;;
+    unpause|resume)
+      local name="${1:?usage: oort machine unpause <name>}"
+      cmd_docker unpause "$MACHINE_PREFIX$name" >/dev/null && echo "unpaused '$name'"
+      ;;
+    *) echo "usage: oort machine create|list|exec|shell|delete <name> [distro] [--ttl <secs>] [--profile P]
        time-travel: oort machine snapshot|snapshots|restore <name> [tag]
-                    oort machine fork <src> <newname>";;
+                    oort machine fork <src> <newname> [<newname>...]
+       lifecycle:   oort machine pause|unpause <name>
+                    oort machine gc [--older-than <secs>] [--purge]";;
   esac
 }
 
@@ -854,7 +1025,7 @@ cmd_disk() {
         cmd_docker system prune -af 2>/dev/null | tail -1
       fi
       printf "trimming…"
-      cmd_exec 'sync; fstrim -a 2>/dev/null || fstrim /; sync' >/dev/null 2>&1
+      cmd_exec 'sync; fstrim -a 2>/dev/null || fstrim /; sync' >/dev/null 2>&1 || true
       sleep 2   # let APFS settle before measuring
       local after; after=$(du -m "$DISK" 2>/dev/null | cut -f1)
       echo " done — disk image ${before}M → ${after}M (returned $((before - after))M to macOS)"
@@ -862,7 +1033,7 @@ cmd_disk() {
     *)
       echo "disk image: $(ls -lh "$DISK" 2>/dev/null | awk '{print $5}') max, $(du -h "$DISK" 2>/dev/null | cut -f1) on disk"
       if vm_running; then
-        cmd_exec 'df -h / | awk "NR==2{print \"guest /:    \"\$3\" used of \"\$2}"' 2>/dev/null
+        cmd_exec 'df -h / | awk "NR==2{print \"guest /:    \"\$3\" used of \"\$2}"' 2>/dev/null || true
         cmd_docker system df 2>/dev/null | sed 's/^/  docker: /' | head -5
       fi
       echo "('oort disk reclaim [--prune]' returns freed space to macOS; a daily in-guest timer also runs it)"
