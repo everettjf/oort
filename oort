@@ -372,6 +372,14 @@ cmd_stop() {
   if ! vm_running; then echo "oort not running"; rm -f "$PIDFILE"; _kill_gvproxy; teardown_docker_context; return 0; fi
   teardown_docker_context
   local pid; pid="$(cat "$PIDFILE")"
+  # Graceful stop drives VZ requestStop, which needs the guest to respond — if
+  # the guest/agent is wedged it never powers off and we wait the full window.
+  # `--force`/`-f` is the escape hatch: skip the wait, kill the VM immediately.
+  if [ "${1:-}" = "--force" ] || [ "${1:-}" = "-f" ]; then
+    echo "stopping (forced)."
+    kill -9 "$pid" 2>/dev/null || true
+    rm -f "$PIDFILE"; _kill_gvproxy; return 0
+  fi
   printf "stopping (graceful)…"
   kill -INT "$pid" 2>/dev/null || true   # → VZ requestStop → guest powers off
   # Poll up to 30s; a healthy guest powers off in a couple of seconds. The
@@ -738,12 +746,14 @@ _machine_net() {
 # too. Empty output (an 'open' source with no labels) → the new machine is open.
 _machine_isolation_flags() {
   local ref="$1" newname="$2"
-  local mem cpus pids net
+  local mem cpus pids net distro
   mem="$(cmd_docker inspect -f '{{ index .Config.Labels "oort.memory" }}' "$ref" 2>/dev/null)"
   cpus="$(cmd_docker inspect -f '{{ index .Config.Labels "oort.cpus" }}' "$ref" 2>/dev/null)"
   pids="$(cmd_docker inspect -f '{{ index .Config.Labels "oort.pids" }}' "$ref" 2>/dev/null)"
   net="$(cmd_docker inspect -f '{{ index .Config.Labels "oort.network" }}' "$ref" 2>/dev/null)"
+  distro="$(cmd_docker inspect -f '{{ index .Config.Labels "oort.distro" }}' "$ref" 2>/dev/null)"
   local f=()
+  [ -n "$distro" ] && [ "$distro" != "<no value>" ] && f+=(--label "oort.distro=$distro")
   [ -n "$mem" ]  && [ "$mem" != "<no value>" ]  && f+=(--memory "$mem"       --label "oort.memory=$mem")
   [ -n "$cpus" ] && [ "$cpus" != "<no value>" ] && f+=(--cpus "$cpus"         --label "oort.cpus=$cpus")
   [ -n "$pids" ] && [ "$pids" != "<no value>" ] && f+=(--pids-limit "$pids"   --label "oort.pids=$pids")
@@ -816,8 +826,9 @@ cmd_machine() {
       cmd_docker container inspect "$MACHINE_PREFIX$name" >/dev/null 2>&1 && { echo "machine '$name' already exists"; exit 1; }
       cmd_docker image inspect "$distro" >/dev/null 2>&1 || { echo "pulling ${distro}…"; cmd_docker pull "$distro" >/dev/null; }
       # Apply caps AND stamp them as labels, so `fork`/`restore` can reproduce
-      # the same isolation on the new machine.
-      local extra=(--label "oort.network=$network")
+      # the same isolation on the new machine. oort.distro keeps `list` readable
+      # (a fork's image is a fork-base tag, not the original distro name).
+      local extra=(--label "oort.network=$network" --label "oort.distro=$distro")
       [ -n "$mem" ]  && extra+=(--memory "$mem"      --label "oort.memory=$mem")
       [ -n "$cpus" ] && extra+=(--cpus "$cpus"        --label "oort.cpus=$cpus")
       [ -n "$pids" ] && extra+=(--pids-limit "$pids"  --label "oort.pids=$pids")
@@ -883,7 +894,8 @@ cmd_machine() {
       ;;
     list|ls)
       echo "NAME            DISTRO          STATUS"
-      cmd_docker ps -a --filter "name=$MACHINE_PREFIX" --format '{{.Names}}\t{{.Image}}\t{{.Status}}' \
+      cmd_docker ps -a --filter "name=$MACHINE_PREFIX" \
+        --format '{{.Names}}	{{if .Label "oort.distro"}}{{.Label "oort.distro"}}{{else}}{{.Image}}{{end}}	{{.Status}}' \
         | sed "s/^$MACHINE_PREFIX//" | awk -F'\t' '{printf "%-15s %-15s %s\n",$1,$2,$3}'
       ;;
     exec)
