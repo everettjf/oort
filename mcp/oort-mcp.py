@@ -23,6 +23,7 @@ Env:
 import base64
 import json
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -479,13 +480,67 @@ def _serve(out, msg):
         _emit(out, resp)
 
 
+class _Lanes:
+    """FIFO-per-key execution: calls that touch the SAME sandbox run ordered and
+    non-overlapping (so a pipelined create→write→read can't race), while calls to
+    DIFFERENT sandboxes run in parallel. One small daemon worker per key; keyless
+    calls go to the shared pool instead. drain() blocks until all queued work has
+    finished, so a clean shutdown (stdin EOF) doesn't kill in-flight lane work."""
+    def __init__(self):
+        self._q = {}
+        self._lock = threading.Lock()
+        self._cond = threading.Condition()
+        self._pending = 0
+
+    def submit(self, key, fn):
+        with self._cond:
+            self._pending += 1
+        with self._lock:
+            q = self._q.get(key)
+            if q is None:
+                q = queue.Queue()
+                self._q[key] = q
+                threading.Thread(target=self._worker, args=(q,), daemon=True).start()
+        q.put(fn)
+
+    def _worker(self, q):
+        while True:
+            fn = q.get()
+            try:
+                fn()
+            except Exception:
+                pass
+            finally:
+                with self._cond:
+                    self._pending -= 1
+                    if self._pending == 0:
+                        self._cond.notify_all()
+
+    def drain(self):
+        with self._cond:
+            while self._pending > 0:
+                self._cond.wait()
+
+
+def _target_sandbox(params):
+    """The sandbox a tools/call causally depends on, or None if it's independent
+    (list/gc/suspend_vm/…). fork* keys on the SOURCE — its forks must run after
+    the source is set up; everything else keys on `name`."""
+    args = params.get("arguments") or {}
+    if params.get("name") in ("fork", "fork_many"):
+        return args.get("source")
+    return args.get("name")
+
+
 def main():
     out = sys.stdout
     # tools/call shells out to the oort CLI (create/fork/snapshot can each take
-    # seconds), so run those on a pool — an agent that forks N sandboxes at once
-    # gets real parallelism instead of one-at-a-time serialization. The cheap
-    # handshake methods (initialize / ping / tools/list) are handled inline so
-    # the startup ordering stays simple and deterministic.
+    # seconds). Calls to different sandboxes run in parallel — an agent forking N
+    # sandboxes at once gets real concurrency — but calls to the SAME sandbox are
+    # serialized in arrival order so a pipelined create→write→read can't race
+    # (F#3). Calls with no sandbox target, and the cheap handshake methods
+    # (initialize / ping / tools/list), don't need ordering.
+    lanes = _Lanes()
     with ThreadPoolExecutor(max_workers=16) as pool:
         for line in sys.stdin:
             line = line.strip()
@@ -496,11 +551,16 @@ def main():
             except json.JSONDecodeError:
                 continue
             if msg.get("method") == "tools/call":
-                pool.submit(_serve, out, msg)
+                key = _target_sandbox(msg.get("params") or {})
+                if key is not None:
+                    lanes.submit(key, lambda m=msg: _serve(out, m))
+                else:
+                    pool.submit(_serve, out, msg)
             else:
                 resp = handle(msg)
                 if resp is not None:
                     _emit(out, resp)
+        lanes.drain()   # don't exit while per-sandbox work is still in flight
 
 
 if __name__ == "__main__":

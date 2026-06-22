@@ -684,7 +684,7 @@ cmd_doctor() {
       [ "$d" = up ] && [ "$a" = up ] && { echo " recovered."; return 0; }
     done
     echo " still wedged — restarting the VM as a last resort."
-    cmd_stop >/dev/null; cmd_start >/dev/null; cmd_doctor
+    cmd_stop --force >/dev/null; cmd_start >/dev/null; cmd_doctor   # force: a wedged agent won't power off gracefully
   else
     echo "   (run 'oort doctor --heal' to wait for self-heal and restart the VM if needed.)"
     return 1
